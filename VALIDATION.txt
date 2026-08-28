@@ -1,0 +1,20 @@
+Groove Lab v0.6 validation
+============================
+
+Static checks completed:
+- all expected source files present
+- C/C++ brace-balance check passed across 23 .h/.cpp files
+- no remaining v0.5 Track.length / Track.rate API references
+- SPACE transport handler present
+- Euclidean Steps/Pulses/Rotate/Division engine present
+- PERFORM temporary-state layer present
+- plugin editor uses resolved algorithmic hits
+
+A local CMake configure was attempted in the generation environment.
+It reached JUCE FetchContent and then stopped because that environment
+cannot resolve github.com. This was a network limitation, not a source
+compiler error.
+
+The real macOS validation step is:
+  cmake -S . -B build -G Xcode
+  cmake --build build --config Release --target GrooveLab

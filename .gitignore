@@ -1,0 +1,48 @@
+# Build
+build/
+build-*/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Makefile
+cmake_install.cmake
+compile_commands.json
+CTestTestfile.cmake
+_deps/
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# JUCE generated
+JuceLibraryCode/
+
+# Artifacts
+*.app/
+*.dSYM/
+*.a
+*.dylib
+*.so
+*.o
+*.obj
+*.lib
+*.exp
+*.ilk
+*.pdb
+*.vst3/
+*.component/
+*.au/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+.cursor/
+*.swp
+*~
+
+# Local audio / plugin host state
+*.xml
+!CMakeLists.txt
