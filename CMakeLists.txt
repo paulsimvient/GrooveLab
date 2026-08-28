@@ -46,6 +46,8 @@ target_sources(GrooveLab PRIVATE
     Source/UI/GrooveLookAndFeel.h
     Source/UI/TorsoPage.h
     Source/UI/TorsoPage.cpp
+    Source/UI/SongPage.h
+    Source/UI/SongPage.cpp
     Source/UI/MainComponent.h
     Source/UI/MainComponent.cpp
     Source/Standalone/Main.cpp
@@ -58,10 +60,15 @@ target_compile_definitions(GrooveLab PUBLIC
     JUCE_PLUGINHOST_AU=1
 )
 
+juce_add_binary_data(GrooveLabAssets SOURCES
+    "${CMAKE_CURRENT_SOURCE_DIR}/Resources/GrooveLabIcon.png"
+)
+
 target_link_libraries(GrooveLab PRIVATE
     juce::juce_audio_utils
     juce::juce_dsp
     juce::juce_gui_extra
+    GrooveLabAssets
 )
 
 juce_add_plugin(GrooveLabPlugin

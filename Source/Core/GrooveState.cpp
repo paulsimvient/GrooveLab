@@ -8,7 +8,7 @@ static VoiceParams defaultsFor(int i)
     switch (i)
     {
         case 0: return {52.0f, 430.0f, 0.46f, 0.03f, 0.58f, 0.10f, 0.04f, 0.18f};
-        case 1: return {185.0f, 245.0f, 0.68f, 0.74f, 0.72f, 0.10f, 0.10f, 0.62f};
+        case 1: return {185.0f, 720.0f, 0.78f, 0.80f, 0.72f, 0.12f, 0.16f, 0.62f};
         case 2: return {320.0f, 175.0f, 0.90f, 0.92f, 0.76f, 0.08f, 0.14f, 0.78f};
         case 3: return {690.0f, 72.0f, 0.62f, 0.96f, 0.94f, 0.04f, 0.05f, 0.90f};
         case 4: return {520.0f, 380.0f, 0.55f, 0.97f, 0.90f, 0.04f, 0.18f, 0.92f};
@@ -32,8 +32,10 @@ GrooveState::GrooveState()
         tracks[i].pulses = defaultPulses[i];
         tracks[i].rotate = defaultRotate[i];
         tracks[i].division = 1.0f;
+        tracks[i].probability = 0.96f;
         tracks[i].midiNote = midiNoteForTrack(i);
     }
+    seedDefaultSong();
 }
 
 VoiceParams GrooveState::effectiveParams(int t, int s) const
@@ -76,6 +78,68 @@ bool GrooveState::trackIsAudible(int track) const
     return ! tracks[track].muted;
 }
 
+void GrooveState::seedDefaultSong()
+{
+    song = {};
+    song.follow = true;
+    song.current = 0;
+
+    auto make = [this](SongPart part, int bars)
+    {
+        SongSection section;
+        section.part = part;
+        section.bars = bars;
+        section.meter = meter;
+        for (int t = 0; t < kTracks; ++t)
+            section.shapes[(size_t) t] = TrackShape::fromTrack(tracks[t]);
+        return section;
+    };
+
+    auto verse = make(SongPart::verse, 4);
+    auto chorus = make(SongPart::chorus, 8);
+    chorus.shapes[1].pulses = juce::jmin(chorus.shapes[1].generatorSteps, chorus.shapes[1].pulses + 2);
+    chorus.shapes[3].pulses = juce::jmin(chorus.shapes[3].generatorSteps, chorus.shapes[3].pulses + 4);
+    auto bridge = make(SongPart::bridge, 4);
+    bridge.shapes[0].pulses = juce::jmax(1, bridge.shapes[0].pulses - 1);
+    bridge.shapes[3].rotate = (bridge.shapes[3].rotate + 4) % juce::jmax(1, bridge.shapes[3].generatorSteps);
+    bridge.shapes[5].pulses = juce::jmin(bridge.shapes[5].generatorSteps, bridge.shapes[5].pulses + 3);
+
+    song.sections.push_back(verse);
+    song.sections.push_back(chorus);
+    song.sections.push_back(bridge);
+    applySongSection(0);
+}
+
+void GrooveState::applySongSection(int index)
+{
+    if (song.sections.empty())
+        return;
+    song.current = juce::jlimit(0, (int) song.sections.size() - 1, index);
+    const auto& section = song.sections[(size_t) song.current];
+    for (int t = 0; t < kTracks; ++t)
+    {
+        auto& tr = tracks[t];
+        const auto& sh = section.shapes[(size_t) t];
+        tr.generatorSteps = juce::jlimit(1, kSteps, sh.generatorSteps);
+        tr.pulses = juce::jlimit(0, tr.generatorSteps, sh.pulses);
+        tr.rotate = sh.rotate;
+        tr.division = sh.division;
+        tr.probability = juce::jlimit(0.0f, 1.0f, sh.probability);
+        tr.velocity = juce::jlimit(0.0f, 1.2f, sh.velocity);
+    }
+    meter = section.meter;
+}
+
+void GrooveState::captureLiveToCurrentSection()
+{
+    if (song.sections.empty())
+        return;
+    song.current = juce::jlimit(0, (int) song.sections.size() - 1, song.current);
+    auto& section = song.sections[(size_t) song.current];
+    for (int t = 0; t < kTracks; ++t)
+        section.shapes[(size_t) t] = TrackShape::fromTrack(tracks[t]);
+}
+
 void GrooveState::setLock(int t, int s, Param p, float v) { tracks[t].steps[s].locks[(int)p] = v; }
 void GrooveState::clearLock(int t, int s, Param p) { tracks[t].steps[s].locks[(int)p].reset(); }
 void GrooveState::clearAllLocks(int t, int s)
@@ -88,8 +152,12 @@ void GrooveState::clearAllLocks(int t, int s)
 juce::var GrooveState::toVar() const
 {
     auto* root = new juce::DynamicObject();
-    root->setProperty("formatVersion", 6);
+    root->setProperty("formatVersion", 9);
+    root->setProperty("name", name);
+    root->setProperty("lastPluginPath", lastPluginPath);
+    root->setProperty("soundMode", soundMode);
     root->setProperty("bpm", bpm);
+    root->setProperty("meter", (int) meter);
     root->setProperty("selectedTrack", selectedTrack);
     root->setProperty("selectedStep", selectedStep);
     root->setProperty("similarity", similarity);
@@ -150,6 +218,35 @@ juce::var GrooveState::toVar() const
     }
 
     root->setProperty("tracks", trackArray);
+
+    auto* songObj = new juce::DynamicObject();
+    songObj->setProperty("follow", song.follow);
+    songObj->setProperty("current", song.current);
+    juce::Array<juce::var> sectionArray;
+    for (const auto& section : song.sections)
+    {
+        auto* so = new juce::DynamicObject();
+        so->setProperty("part", (int) section.part);
+        so->setProperty("bars", section.bars);
+        so->setProperty("meter", (int) section.meter);
+        juce::Array<juce::var> shapes;
+        for (int t = 0; t < kTracks; ++t)
+        {
+            const auto& sh = section.shapes[(size_t) t];
+            auto* sho = new juce::DynamicObject();
+            sho->setProperty("generatorSteps", sh.generatorSteps);
+            sho->setProperty("pulses", sh.pulses);
+            sho->setProperty("rotate", sh.rotate);
+            sho->setProperty("division", sh.division);
+            sho->setProperty("probability", sh.probability);
+            sho->setProperty("velocity", sh.velocity);
+            shapes.add(juce::var(sho));
+        }
+        so->setProperty("shapes", shapes);
+        sectionArray.add(juce::var(so));
+    }
+    songObj->setProperty("sections", sectionArray);
+    root->setProperty("song", juce::var(songObj));
     return juce::var(root);
 }
 
@@ -158,8 +255,21 @@ bool GrooveState::fromVar(const juce::var& v)
     auto* root = v.getDynamicObject();
     if (root == nullptr) return false;
 
+    const int formatVersion = root->getProperty("formatVersion").isVoid()
+        ? 0 : (int) root->getProperty("formatVersion");
+
     auto bpmVar = root->getProperty("bpm");
     if (!bpmVar.isVoid()) bpm = (double)bpmVar;
+    auto meterVar = root->getProperty("meter");
+    if (!meterVar.isVoid())
+        meter = (Meter) juce::jlimit(0, kMeterCount - 1, (int) meterVar);
+    auto nameVar = root->getProperty("name");
+    if (!nameVar.isVoid() && nameVar.toString().isNotEmpty())
+        name = nameVar.toString();
+    auto pluginVar = root->getProperty("lastPluginPath");
+    if (!pluginVar.isVoid()) lastPluginPath = pluginVar.toString();
+    auto modeVar = root->getProperty("soundMode");
+    if (!modeVar.isVoid()) soundMode = juce::jlimit(1, 3, (int) modeVar);
     selectedTrack = juce::jlimit(0, kTracks - 1, (int)root->getProperty("selectedTrack"));
     selectedStep = juce::jlimit(0, kSteps - 1, (int)root->getProperty("selectedStep"));
 
@@ -269,6 +379,78 @@ bool GrooveState::fromVar(const juce::var& v)
                 }
             }
         }
+    }
+
+    auto* songObj = root->getProperty("song").getDynamicObject();
+    if (songObj == nullptr)
+    {
+        seedDefaultSong();
+        return true;
+    }
+
+    song = {};
+    auto followVar = songObj->getProperty("follow");
+    if (! followVar.isVoid()) song.follow = (bool) followVar;
+    song.current = juce::jmax(0, (int) songObj->getProperty("current"));
+    auto sectionsVar = songObj->getProperty("sections");
+    if (sectionsVar.isArray())
+    {
+        for (const auto& item : *sectionsVar.getArray())
+        {
+            auto* so = item.getDynamicObject();
+            if (so == nullptr) continue;
+            SongSection section;
+            section.part = (SongPart) juce::jlimit(0, 7, (int) so->getProperty("part"));
+            section.bars = juce::jlimit(1, 32, (int) so->getProperty("bars"));
+            if (section.bars < 1) section.bars = 4;
+            auto meterSec = so->getProperty("meter");
+            if (! meterSec.isVoid())
+                section.meter = (Meter) juce::jlimit(0, kMeterCount - 1, (int) meterSec);
+            else
+                section.meter = meter;
+            auto shapesVar = so->getProperty("shapes");
+            for (int t = 0; t < kTracks; ++t)
+                section.shapes[(size_t) t] = TrackShape::fromTrack(tracks[t]);
+            if (shapesVar.isArray())
+            {
+                for (int t = 0; t < juce::jmin(kTracks, shapesVar.size()); ++t)
+                {
+                    auto* sho = shapesVar[t].getDynamicObject();
+                    if (sho == nullptr) continue;
+                    auto& sh = section.shapes[(size_t) t];
+                    auto readI = [sho](const char* k, int fb)
+                    {
+                        auto v = sho->getProperty(k);
+                        return v.isVoid() ? fb : (int) v;
+                    };
+                    auto readF = [sho](const char* k, float fb)
+                    {
+                        auto v = sho->getProperty(k);
+                        return v.isVoid() ? fb : (float) v;
+                    };
+                    sh.generatorSteps = juce::jlimit(1, kSteps, readI("generatorSteps", sh.generatorSteps));
+                    sh.pulses = juce::jlimit(0, sh.generatorSteps, readI("pulses", sh.pulses));
+                    sh.rotate = readI("rotate", sh.rotate);
+                    sh.division = readF("division", sh.division);
+                    sh.probability = juce::jlimit(0.0f, 1.0f, readF("probability", sh.probability));
+                    sh.velocity = juce::jlimit(0.0f, 1.2f, readF("velocity", sh.velocity));
+                }
+            }
+            song.sections.push_back(section);
+        }
+    }
+    if (song.sections.empty())
+        seedDefaultSong();
+    else
+        applySongSection(song.current);
+
+    if (formatVersion < 9)
+    {
+        for (auto& track : tracks)
+            track.probability = 0.96f;
+        for (auto& section : song.sections)
+            for (auto& sh : section.shapes)
+                sh.probability = 0.96f;
     }
     return true;
 }

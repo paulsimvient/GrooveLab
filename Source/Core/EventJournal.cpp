@@ -23,6 +23,13 @@ juce::File EventJournal::getStateFile() const
     return getAppDataDir().getChildFile("autosave.groove.json");
 }
 
+juce::File EventJournal::getGroovesDir() const
+{
+    auto dir = getAppDataDir().getChildFile("Grooves");
+    dir.createDirectory();
+    return dir;
+}
+
 void EventJournal::append(const juce::String& type, const juce::String& detail)
 {
     const juce::ScopedLock sl(lock);

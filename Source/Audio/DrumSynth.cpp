@@ -129,9 +129,9 @@ float DrumSynth::renderVoiceSample(ActiveVoice& v)
             const float noisy = onePoleHighpass(v, noise, 0.89f);
             const float snap = noisy * (0.45f + p.transient * 0.9f) * v.transientEnv;
 
-            raw = shell * (1.0f - p.blend * 0.75f)
+            raw = (shell * (1.0f - p.blend * 0.75f)
                 + noisy * (0.25f + p.noise * 0.85f)
-                + snap;
+                + snap) * 1.55f;
             v.phase += v.phaseInc;
             break;
         }

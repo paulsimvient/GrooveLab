@@ -22,7 +22,14 @@ public:
         setColour(juce::Slider::textBoxTextColourId, juce::Colour(0xffbfd7e5));
         setColour(juce::Slider::textBoxBackgroundColourId, juce::Colour(0xff071018));
         setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
-        setColour(juce::ToggleButton::textColourId, juce::Colour(0xffc5d8e4));
+        setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff0c1822));
+        setColour(juce::TextEditor::textColourId, juce::Colour(0xffd8eaf4));
+        setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff213848));
+        setColour(juce::TextEditor::focusedOutlineColourId, juce::Colour(0xff2c98e8));
+        setColour(juce::TextEditor::highlightColourId, juce::Colour(0xff0f80d8));
+        setColour(juce::PopupMenu::backgroundColourId, juce::Colour(0xff0c1822));
+        setColour(juce::PopupMenu::textColourId, juce::Colour(0xffd5ebf7));
+        setColour(juce::PopupMenu::highlightedBackgroundColourId, juce::Colour(0xff0f80d8));
     }
 
     void drawButtonBackground(juce::Graphics& g, juce::Button& b,

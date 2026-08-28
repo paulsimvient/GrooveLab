@@ -28,6 +28,12 @@ public:
     }
 
     void closeButtonPressed() override { setVisible(false); }
+
+    void detachEditor()
+    {
+        clearContentComponent();
+        setVisible(false);
+    }
 };
 
 ExternalPluginHost::ExternalPluginHost()
@@ -37,6 +43,7 @@ ExternalPluginHost::ExternalPluginHost()
 
 ExternalPluginHost::~ExternalPluginHost()
 {
+    ++editorGeneration;
     hideEditor();
     const juce::ScopedLock sl(pluginLock);
     plugin.reset();
@@ -50,7 +57,10 @@ void ExternalPluginHost::configureBuses(juce::AudioPluginInstance& inst)
     stereoOnly.inputBuses = inst.getBusesLayout().inputBuses;
     stereoOnly.outputBuses.add(juce::AudioChannelSet::stereo());
     if (inst.setBusesLayout(stereoOnly))
+    {
+        captureSnareBus(inst);
         return;
+    }
 
     inst.enableAllBuses();
 
@@ -75,10 +85,31 @@ void ExternalPluginHost::configureBuses(juce::AudioPluginInstance& inst)
         for (int i = 0; i < inst.getBusCount(false); ++i)
             if (auto* bus = inst.getBus(false, i))
                 bus->enable(i == mixBus);
+        captureSnareBus(inst);
         return;
     }
 
     // Last resort: keep every bus and fold them in process().
+    captureSnareBus(inst);
+}
+
+void ExternalPluginHost::captureSnareBus(juce::AudioPluginInstance& inst)
+{
+    snareBusChannel = -1;
+    snareBusChannels = 0;
+    for (int i = 0; i < inst.getBusCount(false); ++i)
+    {
+        auto* bus = inst.getBus(false, i);
+        if (bus == nullptr)
+            continue;
+        const auto name = bus->getName().toLowerCase();
+        if (! name.contains("snare") && ! name.contains("snr"))
+            continue;
+        snareBusChannel = bus->getChannelIndexInProcessBlockBuffer(0);
+        snareBusChannels = juce::jmax(1, bus->getNumberOfChannels());
+        if (bus->isEnabled())
+            break;
+    }
 }
 
 void ExternalPluginHost::prepare(double sr, int bs)
@@ -89,9 +120,10 @@ void ExternalPluginHost::prepare(double sr, int bs)
     const juce::ScopedLock sl(pluginLock);
     if (plugin != nullptr)
     {
-        configureBuses(*plugin);
         plugin->setRateAndBufferSizeDetails(sampleRate, blockSize);
         plugin->prepareToPlay(sampleRate, blockSize);
+        plugin->setNonRealtime(false);
+        plugin->suspendProcessing(false);
         const int outs = juce::jmax(2, plugin->getTotalNumOutputChannels());
         pluginBuffer.setSize(outs, blockSize, false, false, true);
     }
@@ -110,6 +142,12 @@ void ExternalPluginHost::release()
 
 bool ExternalPluginHost::loadFromFile(const juce::File& file, juce::String& error)
 {
+    if (plugin != nullptr && pluginFile == file)
+    {
+        error.clear();
+        return true;
+    }
+
     hideEditor();
 
     juce::OwnedArray<juce::PluginDescription> types;
@@ -140,6 +178,7 @@ bool ExternalPluginHost::loadFromFile(const juce::File& file, juce::String& erro
     instance->setRateAndBufferSizeDetails(sampleRate, blockSize);
     instance->prepareToPlay(sampleRate, blockSize);
     instance->setNonRealtime(false);
+    instance->suspendProcessing(false);
 
     const int outs = juce::jmax(2, instance->getTotalNumOutputChannels());
     pluginBuffer.setSize(outs, blockSize, false, false, true);
@@ -147,6 +186,7 @@ bool ExternalPluginHost::loadFromFile(const juce::File& file, juce::String& erro
     {
         const juce::ScopedLock sl(pluginLock);
         plugin = std::move(instance);
+        pluginFile = file;
     }
 
     error.clear();
@@ -155,9 +195,16 @@ bool ExternalPluginHost::loadFromFile(const juce::File& file, juce::String& erro
 
 void ExternalPluginHost::unload()
 {
+    ++editorGeneration;
     hideEditor();
     const juce::ScopedLock sl(pluginLock);
+    if (plugin != nullptr)
+    {
+        plugin->suspendProcessing(true);
+        plugin->releaseResources();
+    }
     plugin.reset();
+    pluginFile = juce::File();
 }
 
 juce::String ExternalPluginHost::getName() const
@@ -166,12 +213,31 @@ juce::String ExternalPluginHost::getName() const
     return plugin != nullptr ? plugin->getName() : juce::String();
 }
 
+juce::File ExternalPluginHost::getFile() const
+{
+    const juce::ScopedLock sl(pluginLock);
+    return pluginFile;
+}
+
 void ExternalPluginHost::showEditor()
+{
+    const auto gen = editorGeneration;
+    juce::Timer::callAfterDelay(50, [this, gen]
+    {
+        if (gen != editorGeneration)
+            return;
+        presentEditorNow();
+    });
+}
+
+void ExternalPluginHost::presentEditorNow()
 {
     juce::AudioPluginInstance* inst = nullptr;
     {
         const juce::ScopedLock sl(pluginLock);
         inst = plugin.get();
+        if (inst != nullptr)
+            inst->suspendProcessing(false);
     }
     if (inst == nullptr)
         return;
@@ -188,10 +254,14 @@ void ExternalPluginHost::showEditor()
 
 void ExternalPluginHost::hideEditor()
 {
+    ++editorGeneration;
+    if (editorWindow == nullptr)
+        return;
+    editorWindow->detachEditor();
     editorWindow.reset();
 }
 
-void ExternalPluginHost::mixToStereo(juce::AudioBuffer<float>& dest, const juce::AudioBuffer<float>& src)
+void ExternalPluginHost::mixToStereo(juce::AudioBuffer<float>& dest, const juce::AudioBuffer<float>& src) const
 {
     const int n = dest.getNumSamples();
     const int dstCh = dest.getNumChannels();
@@ -207,11 +277,21 @@ void ExternalPluginHost::mixToStereo(juce::AudioBuffer<float>& dest, const juce:
         return;
     }
 
-    // Fold Kick/Snare/OH/Room buses into L/R so the whole kit is audible.
-    for (int ch = 0; ch < srcCh; ++ch)
-        dest.addFrom(ch % dstCh, 0, src, ch, 0, n);
+    // Fold Kick/Snare/OH/Room buses into L/R, with the snare bus sitting on top.
+    int boost0 = snareBusChannel;
+    int boostN = snareBusChannels;
+    if (boost0 < 0 && srcCh >= 4)
+    {
+        boost0 = 2;
+        boostN = juce::jmin(2, srcCh - 2);
+    }
 
-    dest.applyGain(1.0f / std::sqrt((float) ((srcCh + dstCh - 1) / dstCh)));
+    for (int ch = 0; ch < srcCh; ++ch)
+    {
+        const bool snare = boost0 >= 0 && ch >= boost0 && ch < boost0 + boostN;
+        const float gain = snare ? 2.2f : (ch < 2 ? 0.85f : 0.7f);
+        dest.addFrom(ch % dstCh, 0, src, ch, 0, n, gain);
+    }
 }
 
 void ExternalPluginHost::process(juce::AudioBuffer<float>& io, juce::MidiBuffer& midi, bool replace)
@@ -220,23 +300,28 @@ void ExternalPluginHost::process(juce::AudioBuffer<float>& io, juce::MidiBuffer&
     if (plugin == nullptr)
         return;
 
+    if (plugin->isSuspended())
+        plugin->suspendProcessing(false);
+
     const int n = io.getNumSamples();
     const int outCh = juce::jmax(2, plugin->getTotalNumOutputChannels());
     if (pluginBuffer.getNumSamples() < n || pluginBuffer.getNumChannels() < outCh)
-        pluginBuffer.setSize(outCh, n, false, false, true);
+        pluginBuffer.setSize(outCh, juce::jmax(n, blockSize), false, false, true);
 
-    pluginBuffer.clear();
+    juce::AudioBuffer<float> block(pluginBuffer.getArrayOfWritePointers(),
+                                   pluginBuffer.getNumChannels(), n);
+    block.clear();
     juce::MidiBuffer midiCopy(midi);
-    plugin->processBlock(pluginBuffer, midiCopy);
+    plugin->processBlock(block, midiCopy);
 
     if (replace)
     {
-        mixToStereo(io, pluginBuffer);
+        mixToStereo(io, block);
     }
     else
     {
         juce::AudioBuffer<float> mixed(io.getNumChannels(), n);
-        mixToStereo(mixed, pluginBuffer);
+        mixToStereo(mixed, block);
         for (int ch = 0; ch < io.getNumChannels(); ++ch)
             io.addFrom(ch, 0, mixed, ch, 0, n);
     }

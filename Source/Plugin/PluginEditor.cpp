@@ -25,7 +25,7 @@ void GrooveLabAudioProcessorEditor::paint(juce::Graphics& g)
 
     g.setColour(juce::Colour(0xffe5f0f6));
     g.setFont(juce::FontOptions(21.0f, juce::Font::bold));
-    g.drawText("GROOVE LAB", 22, 16, 230, 30,
+    g.drawText("the lil' God Projector", 22, 16, 360, 30,
                juce::Justification::centredLeft);
 
     g.setColour(juce::Colour(0xff7c9bad));

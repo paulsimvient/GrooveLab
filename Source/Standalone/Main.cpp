@@ -4,7 +4,7 @@
 class GrooveLabApplication : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override { return "Groove Lab"; }
+    const juce::String getApplicationName() override { return "the lil' God Projector"; }
     const juce::String getApplicationVersion() override { return "0.7.0"; }
 
     void initialise(const juce::String&) override

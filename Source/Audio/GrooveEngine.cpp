@@ -1,5 +1,6 @@
 #include "GrooveEngine.h"
 #include "DrumMidi.h"
+#include <algorithm>
 #include <cmath>
 
 namespace groove
@@ -7,6 +8,7 @@ namespace groove
 GrooveEngine::GrooveEngine()
 {
     loadAutosave();
+    saveAutosave();
 }
 
 void GrooveEngine::prepare(double sampleRate, int maxBlockSize)
@@ -26,25 +28,48 @@ void GrooveEngine::scheduleMidi(juce::MidiBuffer& midiOut, const juce::MidiMessa
         pendingMidi.push_back({ sample - blockSamples, message });
 }
 
+void GrooveEngine::cancelPendingNoteOff(int channel, int note)
+{
+    pendingMidi.erase(std::remove_if(pendingMidi.begin(), pendingMidi.end(),
+        [channel, note](const PendingMidi& event)
+        {
+            return event.message.isNoteOff()
+                && event.message.getChannel() == channel
+                && event.message.getNoteNumber() == note;
+        }), pendingMidi.end());
+}
+
+void GrooveEngine::dropNoteOffs(juce::MidiBuffer& midiOut, int channel, int note)
+{
+    juce::MidiBuffer kept;
+    for (const auto metadata : midiOut)
+    {
+        const auto msg = metadata.getMessage();
+        if (msg.isNoteOff() && msg.getChannel() == channel && msg.getNoteNumber() == note)
+            continue;
+        kept.addEvent(msg, metadata.samplePosition);
+    }
+    midiOut.swapWith(kept);
+}
+
 void GrooveEngine::emitAllControllers(juce::MidiBuffer& midiOut, int track, int step,
                                       int sample, int blockSamples)
 {
-    const auto& tr = grooveState.tracks[juce::jlimit(0, kTracks - 1, track)];
-    const auto& st = tr.steps[juce::jlimit(0, kSteps - 1, step)];
+    // Sound CCs are plugin-global. Only snare may set them so hats do not choke the tail.
+    if (! isSnareHit(track, grooveState.effectiveMidiNote(track, step)))
+        return;
+
     const auto params = grooveState.effectiveParams(track, step);
     const int channel = 1;
-
-    scheduleMidi(midiOut, juce::MidiMessage::controllerEvent(channel, kCcVolume, toMidi7(tr.velocity)),
-                 sample, blockSamples);
-    scheduleMidi(midiOut, juce::MidiMessage::controllerEvent(channel, kCcExpression, toMidi7(st.velocity)),
-                 sample, blockSamples);
-
     for (int i = 0; i < paramCount; ++i)
     {
         const auto p = (Param) i;
+        float value = paramValue(params, p);
+        if (p == Param::decay)
+            value = juce::jmax(value, 1400.0f);
         scheduleMidi(midiOut,
                      juce::MidiMessage::controllerEvent(channel, ccForParam(p),
-                                                        paramToCcValue(p, paramValue(params, p))),
+                                                        paramToCcValue(p, value)),
                      sample, blockSamples);
     }
 }
@@ -52,15 +77,15 @@ void GrooveEngine::emitAllControllers(juce::MidiBuffer& midiOut, int track, int 
 void GrooveEngine::emitTriggerMidi(juce::MidiBuffer& midiOut, const Sequencer::Trigger& tr, int blockSamples)
 {
     const int note = grooveState.effectiveMidiNote(tr.track, tr.step);
-    const bool snare = (tr.track == 1 || note == 38 || note == 40);
+    const bool snare = isSnareHit(tr.track, note);
     float hitVel = tr.velocity;
     if (snare)
     {
-        // UJAM snares read quiet + they gate on short notes. Lift body, keep ghosts quieter.
-        if (hitVel >= 0.45f)
-            hitVel = juce::jlimit(0.85f, 1.2f, std::sqrt(hitVel) * 1.2f);
+        // Sit the snare on top of the kit. Ghosts stay below backbeats but still speak.
+        if (hitVel >= 0.40f)
+            hitVel = 1.2f;
         else
-            hitVel = juce::jmax(0.4f, std::sqrt(hitVel));
+            hitVel = juce::jmax(0.72f, hitVel * 1.6f);
     }
     const int vel = juce::jlimit(1, 127, (int) std::round(hitVel * 127.0f));
     const int channel = 1;
@@ -69,20 +94,21 @@ void GrooveEngine::emitTriggerMidi(juce::MidiBuffer& midiOut, const Sequencer::T
     const int stepSamples = juce::jmax(1,
         (int) (currentSampleRate * 60.0 / juce::jmax(1.0, grooveState.bpm) / 4.0 / division));
     const int spacing = juce::jmax(1, stepSamples / reps);
-    const float decayMs = juce::jmax(snare ? 650.0f : 450.0f,
-                                     grooveState.effectiveParams(tr.track, tr.step).decayMs);
-    // Closed hat can stay short; snare/kick/clap need to ring or UJAM chokes the tail.
+    const float holdMs = snare ? 1800.0f
+                               : juce::jmax(450.0f, grooveState.effectiveParams(tr.track, tr.step).decayMs);
     const int noteLen = (tr.track == 3)
         ? juce::jmax(64, spacing / 2)
-        : juce::jmax((int) (currentSampleRate * decayMs / 1000.0), spacing * 4);
+        : juce::jmax((int) (currentSampleRate * holdMs / 1000.0), snare ? spacing * 8 : spacing * 2);
 
     for (int r = 0; r < reps; ++r)
     {
         const int onAt = tr.sampleOffset + r * spacing;
-        emitAllControllers(midiOut, tr.track, tr.step, onAt, blockSamples);
         if (snare)
         {
-            scheduleMidi(midiOut, juce::MidiMessage::controllerEvent(channel, kCcVolume, vel),
+            dropNoteOffs(midiOut, channel, note);
+            cancelPendingNoteOff(channel, note);
+            emitAllControllers(midiOut, tr.track, tr.step, onAt, blockSamples);
+            scheduleMidi(midiOut, juce::MidiMessage::controllerEvent(channel, kCcVolume, 127),
                          onAt, blockSamples);
             scheduleMidi(midiOut, juce::MidiMessage::controllerEvent(channel, kCcExpression, vel),
                          onAt, blockSamples);
@@ -136,6 +162,7 @@ void GrooveEngine::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& m
 
     if (playing.load())
     {
+        advanceSong(n);
         sequencer.setBpm(grooveState.bpm);
 
         sequencer.processBlock(grooveState, n,
@@ -178,6 +205,8 @@ void GrooveEngine::resetTransport()
     pendingMidi.clear();
     pendingAllNotesOff.store(true);
     sequencer.reset();
+    songSamplesInSection = 0.0;
+    grooveState.applySongSection(0);
     journal.append("transport", "reset");
 }
 
@@ -278,10 +307,12 @@ void GrooveEngine::setVelocity(int track, int step, float value)
 {
     const juce::ScopedLock sl(stateLock);
     grooveState.tracks[track].steps[step].velocity = juce::jlimit(0.0f, 1.2f, value);
-    pendingMidi.push_back({ 0, juce::MidiMessage::controllerEvent(1, kCcExpression,
-                                                                   toMidi7(grooveState.tracks[track].steps[step].velocity)) });
-    pendingMidi.push_back({ 0, juce::MidiMessage::controllerEvent(1, kCcVolume,
-                                                                   toMidi7(grooveState.tracks[track].velocity)) });
+    if (isSnareHit(track, grooveState.effectiveMidiNote(track, step)))
+    {
+        pendingMidi.push_back({ 0, juce::MidiMessage::controllerEvent(1, kCcExpression,
+                                                                       toMidi7(juce::jmax(0.85f, value))) });
+        pendingMidi.push_back({ 0, juce::MidiMessage::controllerEvent(1, kCcVolume, 127) });
+    }
     journal.append("step.velocity", voiceName(track) + " step " + juce::String(step + 1)
                    + "=" + juce::String(value));
     saveAutosave();
@@ -367,6 +398,7 @@ void GrooveEngine::setTrackSteps(int track, int steps)
         st.active = false;
     }
     journal.append("track.steps", voiceName(track) + "=" + juce::String(tr.generatorSteps));
+    syncCurrentSongSection();
     saveAutosave();
 }
 
@@ -381,6 +413,7 @@ void GrooveEngine::setTrackPulses(int track, int pulses)
         st.active = false;
     }
     journal.append("track.pulses", voiceName(track) + "=" + juce::String(tr.pulses));
+    syncCurrentSongSection();
     saveAutosave();
 }
 
@@ -395,6 +428,7 @@ void GrooveEngine::setTrackRotate(int track, int rotate)
         st.active = false;
     }
     journal.append("track.rotate", voiceName(track) + "=" + juce::String(rotate));
+    syncCurrentSongSection();
     saveAutosave();
 }
 
@@ -450,6 +484,7 @@ void GrooveEngine::setTrackDivision(int track, float division)
         if (std::abs(division - c) < dist) { best = c; dist = std::abs(division - c); }
     grooveState.tracks[track].division = best;
     journal.append("track.division", voiceName(track) + "=" + juce::String(best));
+    syncCurrentSongSection();
     saveAutosave();
 }
 
@@ -458,6 +493,7 @@ void GrooveEngine::setTrackProbability(int track, float value)
     const juce::ScopedLock sl(stateLock);
     grooveState.tracks[track].probability = juce::jlimit(0.0f, 1.0f, value);
     journal.append("track.probability", voiceName(track) + "=" + juce::String(value));
+    syncCurrentSongSection();
     saveAutosave();
 }
 
@@ -465,9 +501,11 @@ void GrooveEngine::setTrackVelocity(int track, float value)
 {
     const juce::ScopedLock sl(stateLock);
     grooveState.tracks[track].velocity = juce::jlimit(0.0f, 1.2f, value);
-    pendingMidi.push_back({ 0, juce::MidiMessage::controllerEvent(1, kCcVolume,
-                                                                   toMidi7(grooveState.tracks[track].velocity)) });
+    if (track == 1)
+        pendingMidi.push_back({ 0, juce::MidiMessage::controllerEvent(1, kCcVolume,
+                                                                       toMidi7(juce::jmax(0.85f, grooveState.tracks[track].velocity))) });
     journal.append("track.velocity", voiceName(track) + "=" + juce::String(value));
+    syncCurrentSongSection();
     saveAutosave();
 }
 
@@ -679,7 +717,9 @@ bool GrooveEngine::importMidiFile(const juce::File& file, juce::String& error)
                 continue;
 
             auto& cell = grid[(size_t) track][(size_t) step];
-            const float vel = juce::jlimit(0.05f, 1.2f, msg.getVelocity() / 127.0f);
+            float vel = juce::jlimit(0.05f, 1.2f, msg.getVelocity() / 127.0f);
+            if (track == 1)
+                vel = (vel >= 0.40f) ? juce::jmax(vel, 1.0f) : juce::jmax(vel, 0.65f);
             if (! cell.on)
             {
                 cell.on = true;
@@ -763,23 +803,422 @@ bool GrooveEngine::importMidiFile(const juce::File& file, juce::String& error)
     return true;
 }
 
+void GrooveEngine::syncCurrentSongSection()
+{
+    grooveState.captureLiveToCurrentSection();
+}
+
+void GrooveEngine::advanceSong(int numSamples)
+{
+    auto& song = grooveState.song;
+    if (! song.follow || song.sections.empty())
+        return;
+
+    song.current = juce::jlimit(0, (int) song.sections.size() - 1, song.current);
+    const double samplesPerBar = currentSampleRate * 60.0 / juce::jmax(1.0, grooveState.bpm)
+        * meterQuarterNotesPerBar(grooveState.meter);
+    const double sectionSamples = samplesPerBar * (double) juce::jmax(1, song.sections[(size_t) song.current].bars);
+    songSamplesInSection += (double) numSamples;
+    if (songSamplesInSection < sectionSamples)
+        return;
+
+    songSamplesInSection = std::fmod(songSamplesInSection, sectionSamples);
+    const int next = (song.current + 1) % (int) song.sections.size();
+    grooveState.applySongSection(next);
+}
+
+int GrooveEngine::addSongSection(SongPart part)
+{
+    const juce::ScopedLock sl(stateLock);
+    SongSection section;
+    section.part = part;
+    section.bars = (part == SongPart::chorus ? 8 : part == SongPart::fill ? 1 : 4);
+    section.meter = grooveState.meter;
+    for (int t = 0; t < kTracks; ++t)
+        section.shapes[(size_t) t] = TrackShape::fromTrack(grooveState.tracks[t]);
+    grooveState.song.sections.push_back(section);
+    const int index = (int) grooveState.song.sections.size() - 1;
+    grooveState.applySongSection(index);
+    songSamplesInSection = 0.0;
+    saveAutosave();
+    return index;
+}
+
+void GrooveEngine::removeSongSection(int index)
+{
+    const juce::ScopedLock sl(stateLock);
+    auto& sections = grooveState.song.sections;
+    if (index < 0 || index >= (int) sections.size() || sections.size() <= 1)
+        return;
+    sections.erase(sections.begin() + index);
+    grooveState.applySongSection(juce::jmin(index, (int) sections.size() - 1));
+    songSamplesInSection = 0.0;
+    saveAutosave();
+}
+
+void GrooveEngine::duplicateSongSection(int index)
+{
+    const juce::ScopedLock sl(stateLock);
+    auto& sections = grooveState.song.sections;
+    if (index < 0 || index >= (int) sections.size())
+        return;
+    sections.insert(sections.begin() + index + 1, sections[(size_t) index]);
+    grooveState.applySongSection(index + 1);
+    songSamplesInSection = 0.0;
+    saveAutosave();
+}
+
+void GrooveEngine::selectSongSection(int index)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (grooveState.song.sections.empty())
+        return;
+    grooveState.applySongSection(index);
+    songSamplesInSection = 0.0;
+    saveAutosave();
+}
+
+void GrooveEngine::moveSongSection(int from, int to)
+{
+    const juce::ScopedLock sl(stateLock);
+    auto& sections = grooveState.song.sections;
+    const int n = (int) sections.size();
+    if (from < 0 || from >= n || n <= 1)
+        return;
+    to = juce::jlimit(0, n, to);
+    if (from == to || from + 1 == to)
+        return;
+
+    SongSection moved = std::move(sections[(size_t) from]);
+    sections.erase(sections.begin() + from);
+    int dest = to;
+    if (to > from)
+        dest -= 1;
+    dest = juce::jlimit(0, (int) sections.size(), dest);
+    sections.insert(sections.begin() + dest, std::move(moved));
+
+    int current = grooveState.song.current;
+    if (current == from)
+        current = dest;
+    else
+    {
+        if (from < current)
+            --current;
+        if (dest <= current)
+            ++current;
+        current = juce::jlimit(0, (int) sections.size() - 1, current);
+    }
+    grooveState.song.current = current;
+    saveAutosave();
+}
+
+void GrooveEngine::setSongSectionBars(int index, int bars)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (index < 0 || index >= (int) grooveState.song.sections.size())
+        return;
+    grooveState.song.sections[(size_t) index].bars = juce::jlimit(1, 32, bars);
+    saveAutosave();
+}
+
+void GrooveEngine::setMeter(Meter meter)
+{
+    const juce::ScopedLock sl(stateLock);
+    const int oldSpb = juce::jmax(1, meterStepsPerBar(grooveState.meter));
+    grooveState.meter = meter;
+    const int spb = juce::jmax(1, meterStepsPerBar(meter));
+    for (auto& tr : grooveState.tracks)
+    {
+        int bars = juce::jmax(1, (tr.generatorSteps + oldSpb / 2) / oldSpb);
+        int next = bars * spb;
+        if (next > kSteps)
+            next = spb;
+        tr.generatorSteps = juce::jlimit(1, kSteps, next);
+        tr.pulses = juce::jlimit(0, tr.generatorSteps, tr.pulses);
+        for (auto& st : tr.steps)
+        {
+            st.overrideMode = StepOverrideMode::inherit;
+            st.active = false;
+        }
+    }
+    if (! grooveState.song.sections.empty())
+    {
+        const int i = juce::jlimit(0, (int) grooveState.song.sections.size() - 1,
+                                   grooveState.song.current);
+        grooveState.song.sections[(size_t) i].meter = meter;
+        grooveState.captureLiveToCurrentSection();
+    }
+    saveAutosave();
+}
+
+void GrooveEngine::setSectionTrackShape(int section, int track, const TrackShape& shape)
+{
+    const juce::ScopedLock sl(stateLock);
+    auto& sections = grooveState.song.sections;
+    if (section < 0 || section >= (int) sections.size()
+        || track < 0 || track >= kTracks)
+        return;
+
+    auto& sh = sections[(size_t) section].shapes[(size_t) track];
+    const int steps = juce::jlimit(1, kSteps, shape.generatorSteps);
+    const bool rhythmChanged = sh.generatorSteps != steps
+        || sh.pulses != shape.pulses
+        || sh.rotate != shape.rotate;
+
+    sh.generatorSteps = steps;
+    sh.pulses = juce::jlimit(0, sh.generatorSteps, shape.pulses);
+    sh.rotate = shape.rotate;
+    sh.division = shape.division;
+    sh.probability = juce::jlimit(0.0f, 1.0f, shape.probability);
+    sh.velocity = juce::jlimit(0.0f, 1.2f, shape.velocity);
+
+    if (grooveState.song.current == section)
+    {
+        auto& tr = grooveState.tracks[track];
+        tr.generatorSteps = sh.generatorSteps;
+        tr.pulses = sh.pulses;
+        tr.rotate = sh.rotate;
+        tr.division = sh.division;
+        tr.probability = sh.probability;
+        tr.velocity = sh.velocity;
+        if (rhythmChanged)
+        {
+            for (auto& st : tr.steps)
+            {
+                st.overrideMode = StepOverrideMode::inherit;
+                st.active = false;
+            }
+        }
+    }
+    saveAutosave();
+}
+
+void GrooveEngine::setSongFollow(bool shouldFollow)
+{
+    const juce::ScopedLock sl(stateLock);
+    grooveState.song.follow = shouldFollow;
+    saveAutosave();
+}
+
+int GrooveEngine::songBarInSection() const
+{
+    const juce::ScopedLock sl(stateLock);
+    const double samplesPerBar = currentSampleRate * 60.0 / juce::jmax(1.0, grooveState.bpm)
+        * meterQuarterNotesPerBar(grooveState.meter);
+    return 1 + (int) (songSamplesInSection / juce::jmax(1.0, samplesPerBar));
+}
+
+double GrooveEngine::songSectionProgress() const
+{
+    const juce::ScopedLock sl(stateLock);
+    const auto& song = grooveState.song;
+    if (song.sections.empty())
+        return 0.0;
+    const int i = juce::jlimit(0, (int) song.sections.size() - 1, song.current);
+    const double samplesPerBar = currentSampleRate * 60.0 / juce::jmax(1.0, grooveState.bpm)
+        * meterQuarterNotesPerBar(grooveState.meter);
+    const double total = samplesPerBar * (double) juce::jmax(1, song.sections[(size_t) i].bars);
+    return juce::jlimit(0.0, 1.0, songSamplesInSection / juce::jmax(1.0, total));
+}
+
 void GrooveEngine::saveAutosave()
 {
     if (performBase.has_value()) return;
-    const auto json = juce::JSON::toString(grooveState.toVar(), true);
-    journal.getStateFile().replaceWithText(json);
+    juce::String error;
+    writeDocumentToFile(journal.getStateFile(), error);
 }
 
 bool GrooveEngine::loadAutosave()
 {
-    auto f = journal.getStateFile();
-    if (! f.existsAsFile())
-        return false;
-
-    auto parsed = juce::JSON::parse(f);
-    if (parsed.isVoid())
-        return false;
-
-    return grooveState.fromVar(parsed);
+    juce::String error;
+    return readDocumentFromFile(journal.getStateFile(), error);
 }
+
+juce::String GrooveEngine::legalGrooveName(const juce::String& name)
+{
+    auto n = name.trim();
+    if (n.isEmpty())
+        n = "the lil' God Projector";
+    n = juce::File::createLegalFileName(n);
+    if (n.isEmpty())
+        n = "the lil God Projector";
+    return n;
+}
+
+juce::File GrooveEngine::groovesDir() const
+{
+    return journal.getGroovesDir();
+}
+
+juce::var GrooveEngine::documentToVar() const
+{
+    auto* root = new juce::DynamicObject();
+    root->setProperty("formatVersion", 9);
+    root->setProperty("groove", grooveState.toVar());
+    root->setProperty("ancestry", ancestryGraph.toVar());
+    return juce::var(root);
+}
+
+bool GrooveEngine::documentFromVar(const juce::var& v)
+{
+    auto* root = v.getDynamicObject();
+    if (root == nullptr)
+        return false;
+
+    auto grooveVar = root->getProperty("groove");
+    if (grooveVar.getDynamicObject() != nullptr)
+    {
+        if (! grooveState.fromVar(grooveVar))
+            return false;
+        ancestryGraph.fromVar(root->getProperty("ancestry"));
+        return true;
+    }
+
+    ancestryGraph = {};
+    return grooveState.fromVar(v);
+}
+
+bool GrooveEngine::writeDocumentToFile(const juce::File& file, juce::String& error)
+{
+    const auto doc = documentToVar();
+    if (! file.getParentDirectory().createDirectory())
+    {
+        error = "Could not create " + file.getParentDirectory().getFullPathName();
+        return false;
+    }
+    if (! file.replaceWithText(juce::JSON::toString(doc, true)))
+    {
+        error = "Could not write " + file.getFileName();
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool GrooveEngine::readDocumentFromFile(const juce::File& file, juce::String& error)
+{
+    if (! file.existsAsFile())
+    {
+        error = "Missing file: " + file.getFileName();
+        return false;
+    }
+    auto parsed = juce::JSON::parse(file);
+    if (parsed.isVoid())
+    {
+        error = "Not a Groove Lab file: " + file.getFileName();
+        return false;
+    }
+    const juce::ScopedLock sl(stateLock);
+    if (! documentFromVar(parsed))
+    {
+        error = "Could not parse " + file.getFileName();
+        return false;
+    }
+    sequencer.reset();
+    songSamplesInSection = 0.0;
+    pendingMidi.clear();
+    pendingAllNotesOff.store(true);
+    error.clear();
+    return true;
+}
+
+juce::Array<GrooveEngine::StoredGroove> GrooveEngine::listStoredGrooves() const
+{
+    juce::Array<StoredGroove> result;
+    for (const auto& f : groovesDir().findChildFiles(juce::File::findFiles, false, "*.groove.json"))
+    {
+        StoredGroove item;
+        item.file = f;
+        item.name = f.getFileNameWithoutExtension().upToLastOccurrenceOf(".groove", false, false);
+        if (item.name.isEmpty())
+            item.name = f.getFileNameWithoutExtension();
+        auto parsed = juce::JSON::parse(f);
+        if (auto* root = parsed.getDynamicObject())
+        {
+            auto grooveVar = root->getProperty("groove");
+            auto* g = grooveVar.getDynamicObject();
+            if (g == nullptr) g = root;
+            auto n = g->getProperty("name").toString();
+            if (n.isNotEmpty())
+                item.name = n;
+        }
+        result.add(item);
+    }
+    struct NameOrder
+    {
+        static int compareElements(const StoredGroove& a, const StoredGroove& b)
+        {
+            return a.name.compareIgnoreCase(b.name);
+        }
+    };
+    NameOrder order;
+    result.sort(order);
+    return result;
+}
+
+bool GrooveEngine::saveStoredGroove(const juce::String& name, juce::String& error)
+{
+    const auto legal = legalGrooveName(name);
+    {
+        const juce::ScopedLock sl(stateLock);
+        grooveState.name = legal;
+        grooveState.captureLiveToCurrentSection();
+    }
+    const auto file = groovesDir().getChildFile(legal + ".groove.json");
+    if (! writeDocumentToFile(file, error))
+        return false;
+    saveAutosave();
+    journal.append("store.save", legal);
+    return true;
+}
+
+bool GrooveEngine::loadStoredGroove(const juce::File& file, juce::String& error)
+{
+    if (! readDocumentFromFile(file, error))
+        return false;
+    saveAutosave();
+    journal.append("store.load", file.getFileName());
+    return true;
+}
+
+bool GrooveEngine::saveGrooveFile(const juce::File& file, juce::String& error)
+{
+    {
+        const juce::ScopedLock sl(stateLock);
+        auto stem = file.getFileNameWithoutExtension();
+        if (stem.endsWithIgnoreCase(".groove"))
+            stem = stem.upToLastOccurrenceOf(".groove", false, false);
+        if (stem.isNotEmpty())
+            grooveState.name = legalGrooveName(stem);
+        else if (grooveState.name.isEmpty())
+            grooveState.name = legalGrooveName(file.getFileNameWithoutExtension());
+        grooveState.captureLiveToCurrentSection();
+    }
+    return writeDocumentToFile(file, error);
+}
+
+bool GrooveEngine::loadGrooveFile(const juce::File& file, juce::String& error)
+{
+    return loadStoredGroove(file, error);
+}
+
+void GrooveEngine::newProject()
+{
+    {
+        const juce::ScopedLock sl(stateLock);
+        const auto keepPlugin = grooveState.lastPluginPath;
+        const int keepMode = grooveState.soundMode;
+        grooveState = GrooveState();
+        grooveState.lastPluginPath = keepPlugin;
+        grooveState.soundMode = keepMode;
+        ancestryGraph = {};
+        sequencer.reset();
+        songSamplesInSection = 0.0;
+        pendingMidi.clear();
+        pendingAllNotesOff.store(true);
+    }
+    saveAutosave();
+    journal.append("store.new", grooveState.name);
+}
+
 }

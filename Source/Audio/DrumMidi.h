@@ -56,6 +56,11 @@ inline bool isUjamKitNote(int note)
     return note >= kUjamKitLow && note <= kUjamKitHigh;
 }
 
+inline bool isSnareHit(int track, int note)
+{
+    return track == 1 || note == 38 || note == 40;
+}
+
 // Map a UJAM kit key onto Groove Lab's 8 tracks.
 inline int trackIndexForUjamNote(int note)
 {

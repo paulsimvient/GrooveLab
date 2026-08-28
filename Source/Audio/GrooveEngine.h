@@ -73,6 +73,32 @@ public:
     bool loadAutosave();
     bool importMidiFile(const juce::File& file, juce::String& error);
 
+    struct StoredGroove
+    {
+        juce::String name;
+        juce::File file;
+    };
+    static juce::String legalGrooveName(const juce::String& name);
+    juce::File groovesDir() const;
+    juce::Array<StoredGroove> listStoredGrooves() const;
+    bool saveStoredGroove(const juce::String& name, juce::String& error);
+    bool loadStoredGroove(const juce::File& file, juce::String& error);
+    bool saveGrooveFile(const juce::File& file, juce::String& error);
+    bool loadGrooveFile(const juce::File& file, juce::String& error);
+    void newProject();
+
+    int addSongSection(SongPart part);
+    void removeSongSection(int index);
+    void duplicateSongSection(int index);
+    void selectSongSection(int index);
+    void moveSongSection(int from, int to);
+    void setSongSectionBars(int index, int bars);
+    void setSectionTrackShape(int section, int track, const TrackShape& shape);
+    void setMeter(Meter meter);
+    void setSongFollow(bool shouldFollow);
+    int songBarInSection() const;
+    double songSectionProgress() const;
+
     int currentStep() const noexcept { return sequencer.getCurrentStep(); }
     int currentStepForTrack(int track) const noexcept { return sequencer.getTrackStep(track); }
 
@@ -91,15 +117,24 @@ private:
     };
     std::vector<PendingMidi> pendingMidi;
     std::optional<Sequencer::Trigger> queuedAudition;
-    std::atomic<bool> internalSynthEnabled { true };
+    std::atomic<bool> internalSynthEnabled { false };
     std::atomic<bool> pendingAllNotesOff { false };
 
     void scheduleMidi(juce::MidiBuffer& midiOut, const juce::MidiMessage& message,
                       int sample, int blockSamples);
     void emitTriggerMidi(juce::MidiBuffer& midiOut, const Sequencer::Trigger& tr, int blockSamples);
     void emitAllControllers(juce::MidiBuffer& midiOut, int track, int step, int sample, int blockSamples);
+    void cancelPendingNoteOff(int channel, int note);
+    void dropNoteOffs(juce::MidiBuffer& midiOut, int channel, int note);
+    void syncCurrentSongSection();
+    void advanceSong(int numSamples);
+    juce::var documentToVar() const;
+    bool documentFromVar(const juce::var&);
+    bool writeDocumentToFile(const juce::File& file, juce::String& error);
+    bool readDocumentFromFile(const juce::File& file, juce::String& error);
     double currentSampleRate = 44100.0;
-    std::atomic<bool> playing { true };
+    double songSamplesInSection = 0.0;
+    std::atomic<bool> playing { false };
     std::optional<GrooveState> performBase;
 };
 }

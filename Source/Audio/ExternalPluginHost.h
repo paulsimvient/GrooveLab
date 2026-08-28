@@ -16,9 +16,11 @@ public:
     void unload();
     bool isLoaded() const noexcept { return plugin != nullptr; }
     juce::String getName() const;
+    juce::File getFile() const;
 
     void showEditor();
     void hideEditor();
+    bool isEditorOpen() const noexcept { return editorWindow != nullptr; }
 
     // replace=true overwrites io with plugin audio; false mixes plugin into io.
     void process(juce::AudioBuffer<float>& io, juce::MidiBuffer& midi, bool replace);
@@ -26,8 +28,9 @@ public:
 private:
     class EditorWindow;
 
-    static void configureBuses(juce::AudioPluginInstance&);
-    static void mixToStereo(juce::AudioBuffer<float>& dest, const juce::AudioBuffer<float>& src);
+    void configureBuses(juce::AudioPluginInstance&);
+    void captureSnareBus(juce::AudioPluginInstance&);
+    void mixToStereo(juce::AudioBuffer<float>& dest, const juce::AudioBuffer<float>& src) const;
 
     juce::AudioPluginFormatManager formatManager;
     std::unique_ptr<juce::AudioPluginInstance> plugin;
@@ -36,5 +39,10 @@ private:
     double sampleRate = 44100.0;
     int blockSize = 512;
     juce::AudioBuffer<float> pluginBuffer;
+    juce::File pluginFile;
+    int snareBusChannel = -1;
+    int snareBusChannels = 0;
+    uint32_t editorGeneration = 0;
+    void presentEditorNow();
 };
 }

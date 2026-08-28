@@ -379,6 +379,17 @@ void TorsoPage::paint(juce::Graphics& g)
             g.setColour(juce::Colour(0xff16120e));
         g.fillRoundedRectangle(pad, 5.0f);
 
+        if (groove::meterIsBarLine(st.meter, step))
+        {
+            g.setColour(juce::Colour(0xffffc38a).withAlpha(0.55f));
+            g.drawRoundedRectangle(pad, 5.0f, 1.6f);
+        }
+        else if (groove::meterIsBeatLine(st.meter, step))
+        {
+            g.setColour(juce::Colour(0xffff7a18).withAlpha(0.28f));
+            g.drawRoundedRectangle(pad, 5.0f, 1.1f);
+        }
+
         if (resolved)
         {
             auto fill = pad.withTrimmedTop(pad.getHeight() * (1.0f - juce::jlimit(0.12f, 1.0f, ss.velocity)));

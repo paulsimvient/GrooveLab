@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "../Audio/DrumMidi.h"
+#include <BinaryData.h>
 #include <initializer_list>
 
 namespace
@@ -75,10 +76,24 @@ MainComponent::MainComponent()
     setWantsKeyboardFocus(true);
     setFocusContainerType(juce::Component::FocusContainerType::focusContainer);
 
-    projectLabel.setText("GROOVE 01", juce::dontSendNotification);
-    projectLabel.setColour(juce::Label::textColourId, juce::Colour(0xffd8eaf4));
-    projectLabel.setFont(juce::FontOptions(14.0f, juce::Font::bold));
-    addAndMakeVisible(projectLabel);
+    projectName.setText(engine.state().name);
+    projectName.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+    projectName.setJustification(juce::Justification::centredLeft);
+    projectName.setIndents(8, 0);
+    projectName.setBorder({ 1, 1, 1, 1 });
+    projectName.setColour(juce::TextEditor::backgroundColourId, juce::Colour(0xff0c1822));
+    projectName.setColour(juce::TextEditor::outlineColourId, juce::Colour(0xff213848));
+    projectName.onReturnKey = [this]
+    {
+        engine.state().name = projectName.getText().trim();
+        saveCurrentGroove();
+    };
+    projectName.onFocusLost = [this]
+    {
+        engine.state().name = projectName.getText().trim();
+        engine.saveAutosave();
+    };
+    addAndMakeVisible(projectName);
 
     addSmallLabel(bpmLabel, "BPM");
     bpm.setRange(40.0, 260.0, 1.0);
@@ -88,23 +103,44 @@ MainComponent::MainComponent()
     bpm.setMouseDragSensitivity(180);
     bpm.onValueChange=[this]{ if(!refreshing){ engine.state().bpm=bpm.getValue(); engine.saveAutosave(); }};
     addAndMakeVisible(bpm);
+    addSmallLabel(meterLabel, "METER");
+    for (int i = 0; i < groove::kMeterCount; ++i)
+        meterBox.addItem(groove::meterName((groove::Meter) i), i + 1);
+    meterBox.onChange = [this]
+    {
+        if (refreshing) return;
+        engine.setMeter((groove::Meter) (meterBox.getSelectedId() - 1));
+        songPage.refreshFromEngine();
+        torsoPage.refreshFromEngine();
+        refreshFromSelection();
+        repaint();
+    };
+    addAndMakeVisible(meterBox);
 
     for (auto* b : {&playButton,&resetButton,&captureButton,&backButton,&auditionButton,&performButton,&commitPerformButton,
-                    &clearLocks,&sparse,&syncopate,&human,&dense,&soundEvolve,&pageGridButton,&pageT1Button,&prefsButton}) addAndMakeVisible(*b);
+                    &clearLocks,&sparse,&syncopate,&human,&dense,&soundEvolve,&pageGridButton,&pageT1Button,&pageSongButton,&prefsButton,&saveButton,&saveAsButton,&loadButton}) addAndMakeVisible(*b);
 
     pageGridButton.setClickingTogglesState(true);
     pageT1Button.setClickingTogglesState(true);
+    pageSongButton.setClickingTogglesState(true);
     pageGridButton.setRadioGroupId(42);
     pageT1Button.setRadioGroupId(42);
+    pageSongButton.setRadioGroupId(42);
     pageGridButton.setToggleState(true, juce::dontSendNotification);
-    pageGridButton.onClick = [this] { setT1View(false); };
-    pageT1Button.onClick = [this] { setT1View(true); };
+    pageGridButton.onClick = [this] { setPage(0); };
+    pageT1Button.onClick = [this] { setPage(1); };
+    pageSongButton.onClick = [this] { setPage(2); };
     prefsButton.onClick = [this] { showPreferences(); };
+    saveButton.onClick = [this] { saveCurrentGroove(); };
+    saveAsButton.onClick = [this] { saveGrooveAs(); };
+    loadButton.onClick = [this] { showLoadMenu(); };
 
     soundSource.addItem("INTERNAL", 1);
     soundSource.addItem("UJAM / VST", 2);
     soundSource.addItem("BOTH", 3);
-    soundSource.setSelectedId(1, juce::dontSendNotification);
+    soundSource.setSelectedId(2, juce::dontSendNotification);
+    engine.setInternalSynthEnabled(false);
+    soundMode.store(2);
     soundSource.onChange = [this]
     {
         const int id = soundSource.getSelectedId();
@@ -139,14 +175,23 @@ MainComponent::MainComponent()
     torsoPage.onPatternChanged = [this]
     {
         refreshFromSelection();
+        songPage.refreshFromEngine();
     };
     torsoPage.onStatusMessage = [this](const juce::String& text)
     {
         evolutionStatus.setText(text, juce::dontSendNotification);
     };
 
+    addAndMakeVisible(songPage);
+    songPage.setVisible(false);
+    songPage.onSongChanged = [this]
+    {
+        refreshFromSelection();
+        torsoPage.refreshFromEngine();
+    };
+
     playButton.onClick=[this]{ toggleTransport(); };
-    resetButton.onClick=[this]{ engine.resetTransport(); repaint(); };
+    resetButton.onClick=[this]{ engine.resetTransport(); torsoPage.refreshFromEngine(); songPage.refreshFromEngine(); refreshFromSelection(); repaint(); };
     auditionButton.onClick=[this]{ engine.auditionSelected(); };
     captureButton.onClick=[this]{ evolutionStatus.setText("Captured node "+juce::String(engine.capture("manual")),juce::dontSendNotification); repaint(); };
     backButton.onClick=[this]{ auto ok=engine.back(); evolutionStatus.setText(ok?"Returned to parent":"No parent",juce::dontSendNotification); refreshFromSelection(); repaint(); };
@@ -205,7 +250,7 @@ MainComponent::MainComponent()
     };
     addSmallLabel(selectedLabel,"SELECTED"); selectedLabel.setFont(juce::FontOptions(13.0f,juce::Font::bold));
     addSmallLabel(evolutionStatus,"READY");
-    addSmallLabel(footer,"MIDI to UJAM: velocity · CC7 volume · CC11 expression · CC20–27 sound · drop a phrase to load the grid");
+    addSmallLabel(footer,"SAVE stores this groove  ·  SAVE AS makes a named copy  ·  ⌘S save  ·  ⌘⇧S save as  ·  ⌘O load");
 
     for(int i=0;i<groove::paramCount;++i)
     {
@@ -244,6 +289,15 @@ MainComponent::MainComponent()
 
     evolvePolicy.addItem("PROTECT",1); evolvePolicy.addItem("ANCHORS ONLY",2); evolvePolicy.addItem("FREE",3);
     evolvePolicy.onChange=[this]{ if(!refreshing) engine.setTrackEvolutionPolicy(engine.state().selectedTrack,(groove::EvolutionPolicy)(evolvePolicy.getSelectedId()-1)); }; addAndMakeVisible(evolvePolicy);
+    addSmallLabel(policyLabel, "POLICY");
+    addSmallLabel(trackProbLabel, "TRACK PROB");
+    addSmallLabel(trackVelLabel, "TRACK VEL");
+    policyLabel.setBorderSize({});
+    trackProbLabel.setBorderSize({});
+    trackVelLabel.setBorderSize({});
+    policyLabel.setInterceptsMouseClicks(false, false);
+    trackProbLabel.setInterceptsMouseClicks(false, false);
+    trackVelLabel.setInterceptsMouseClicks(false, false);
     configureLinear(evolveAmount,0,1,0.01); configureLinear(similarity,0,1,0.01); configureLinear(lockResistance,0,1,0.01);
     addAndMakeVisible(evolveAmount); addAndMakeVisible(similarity); addAndMakeVisible(lockResistance);
     evolveAmount.onValueChange=[this]{ if(!refreshing) engine.setTrackEvolveAmount(engine.state().selectedTrack,(float)evolveAmount.getValue()); };
@@ -262,10 +316,12 @@ MainComponent::MainComponent()
     for (auto* child : getChildren())
         child->addKeyListener(this);
     torsoPage.addKeyListener(this);
+    songPage.addKeyListener(this);
 
     auto settingsXml = juce::XmlDocument::parse(audioSettingsFile());
     setAudioChannels(0, 2, settingsXml.get());
     deviceManager.addChangeListener(this);
+    applyLoadedSession();
     setSize(1600,900); refreshFromSelection(); startTimerHz(30);
     playButton.setButtonText(engine.isPlaying()?"STOP":"PLAY");
 }
@@ -300,7 +356,7 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& info)
     engine.process(view, midi);
 
     const int mode = soundMode.load();
-    if (mode >= 2)
+    if (mode >= 2 && pluginHost.isLoaded())
         pluginHost.process(view, midi, mode == 2);
 
     if (midiOutput != nullptr)
@@ -353,6 +409,43 @@ void MainComponent::choosePluginFile()
         });
 }
 
+void MainComponent::tryLoadUjamHot()
+{
+    const auto vst3 = juce::File("/Library/Audio/Plug-Ins/VST3/VD-HOT.vst3");
+    const auto au = juce::File("/Library/Audio/Plug-Ins/Components/VD-HOT.component");
+    const auto file = vst3.exists() ? vst3 : au;
+    if (! file.exists())
+    {
+        evolutionStatus.setText("UJAM Hot not found — click LOAD VST", juce::dontSendNotification);
+        return;
+    }
+    if (pluginHost.isLoaded() && pluginHost.getFile() == file)
+        return;
+
+    juce::String error;
+    if (pluginHost.loadFromFile(file, error))
+    {
+        soundSource.setSelectedId(2, juce::dontSendNotification);
+        soundMode.store(2);
+        engine.setInternalSynthEnabled(false);
+        engine.state().soundMode = 2;
+        engine.state().lastPluginPath = file.getFullPathName();
+        engine.saveAutosave();
+        pluginHost.prepare(deviceManager.getCurrentAudioDevice() != nullptr
+                               ? deviceManager.getCurrentAudioDevice()->getCurrentSampleRate()
+                               : 44100.0,
+                           deviceManager.getCurrentAudioDevice() != nullptr
+                               ? deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
+                               : 512);
+        evolutionStatus.setText("UJAM · Virtual Drummer Hot", juce::dontSendNotification);
+        pluginHost.showEditor();
+    }
+    else
+    {
+        evolutionStatus.setText("UJAM Hot failed: " + error, juce::dontSendNotification);
+    }
+}
+
 void MainComponent::browseForPlugin()
 {
     fileChooser = std::make_unique<juce::FileChooser>(
@@ -378,14 +471,253 @@ void MainComponent::loadPluginFromFile(const juce::File& file)
     juce::String error;
     if (pluginHost.loadFromFile(file, error))
     {
-        soundSource.setSelectedId(2, juce::sendNotification);
+        soundSource.setSelectedId(2, juce::dontSendNotification);
+        soundMode.store(2);
+        engine.setInternalSynthEnabled(false);
+        engine.state().soundMode = 2;
+        engine.state().lastPluginPath = file.getFullPathName();
+        engine.saveAutosave();
+        pluginHost.prepare(deviceManager.getCurrentAudioDevice() != nullptr
+                               ? deviceManager.getCurrentAudioDevice()->getCurrentSampleRate()
+                               : 44100.0,
+                           deviceManager.getCurrentAudioDevice() != nullptr
+                               ? deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
+                               : 512);
         evolutionStatus.setText("PLUGIN · " + pluginHost.getName(), juce::dontSendNotification);
         pluginHost.showEditor();
     }
     else
     {
-        evolutionStatus.setText("Plugin load failed: " + error, juce::dontSendNotification);
+        soundSource.setSelectedId(1, juce::dontSendNotification);
+        soundMode.store(1);
+        engine.setInternalSynthEnabled(true);
+        evolutionStatus.setText("Plugin load failed: " + error + " — using INTERNAL",
+                                juce::dontSendNotification);
     }
+}
+
+void MainComponent::captureSessionIntoState()
+{
+    engine.state().name = projectName.getText().trim();
+    if (engine.state().name.isEmpty())
+        engine.state().name = "the lil' God Projector";
+    engine.state().soundMode = soundMode.load();
+    if (pluginHost.isLoaded())
+        engine.state().lastPluginPath = pluginHost.getFile().getFullPathName();
+}
+
+void MainComponent::applyLoadedSession()
+{
+    const auto& st = engine.state();
+    projectName.setText(st.name, false);
+    const int mode = juce::jlimit(1, 3, st.soundMode);
+    soundMode.store(mode);
+    soundSource.setSelectedId(mode, juce::dontSendNotification);
+    engine.setInternalSynthEnabled(mode != 2);
+
+    const auto pluginFile = juce::File(st.lastPluginPath);
+    const bool alreadyLoaded = pluginHost.isLoaded()
+        && (! pluginFile.exists() || pluginHost.getFile() == pluginFile);
+
+    // Keep a live UJAM instance. Reloading / re-preparing it on New or LOAD
+    // tears down its buses and the kit goes silent.
+    if (! alreadyLoaded)
+    {
+        if (pluginFile.exists())
+        {
+            juce::String error;
+            if (pluginHost.loadFromFile(pluginFile, error))
+            {
+                soundSource.setSelectedId(2, juce::dontSendNotification);
+                soundMode.store(2);
+                engine.setInternalSynthEnabled(false);
+                pluginHost.prepare(deviceManager.getCurrentAudioDevice() != nullptr
+                                       ? deviceManager.getCurrentAudioDevice()->getCurrentSampleRate()
+                                       : 44100.0,
+                                   deviceManager.getCurrentAudioDevice() != nullptr
+                                       ? deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
+                                       : 512);
+                evolutionStatus.setText("LOADED · " + st.name + " · " + pluginHost.getName(),
+                                        juce::dontSendNotification);
+                pluginHost.showEditor();
+            }
+            else
+            {
+                tryLoadUjamHot();
+            }
+        }
+        else
+        {
+            tryLoadUjamHot();
+        }
+    }
+    else if (pluginHost.isLoaded())
+    {
+        evolutionStatus.setText("LOADED · " + st.name + " · " + pluginHost.getName(),
+                                juce::dontSendNotification);
+    }
+
+    torsoPage.refreshFromEngine();
+    songPage.refreshFromEngine();
+    refreshFromSelection();
+
+    if (soundMode.load() >= 2 && ! pluginHost.isLoaded())
+    {
+        soundSource.setSelectedId(1, juce::dontSendNotification);
+        soundMode.store(1);
+        engine.setInternalSynthEnabled(true);
+        engine.state().soundMode = 1;
+        evolutionStatus.setText("UJAM not loaded — using INTERNAL. Click LOAD VST to host Hot.",
+                                juce::dontSendNotification);
+    }
+
+    repaint();
+}
+
+void MainComponent::saveCurrentGroove()
+{
+    captureSessionIntoState();
+    juce::String error;
+    if (engine.saveStoredGroove(engine.state().name, error))
+    {
+        projectName.setText(engine.state().name, false);
+        evolutionStatus.setText("SAVED · " + engine.state().name, juce::dontSendNotification);
+    }
+    else
+    {
+        evolutionStatus.setText("Save failed: " + error, juce::dontSendNotification);
+    }
+}
+
+void MainComponent::saveGrooveAs()
+{
+    captureSessionIntoState();
+    auto current = engine.state().name.trim();
+    if (current.isEmpty())
+        current = "the lil' God Projector";
+    const auto suggested = current.endsWithIgnoreCase(" copy") ? current : current + " copy";
+
+    auto* w = new juce::AlertWindow("Save As",
+                                    "Saves a new named groove. The current file is left as-is.",
+                                    juce::MessageBoxIconType::QuestionIcon);
+    w->addTextEditor("name", suggested, "Name");
+    w->addButton("Save", 1, juce::KeyPress(juce::KeyPress::returnKey));
+    w->addButton("Cancel", 0, juce::KeyPress(juce::KeyPress::escapeKey));
+    w->enterModalState(true, juce::ModalCallbackFunction::create([this, w](int result)
+    {
+        if (result != 1)
+            return;
+        auto name = w->getTextEditorContents("name").trim();
+        if (name.isEmpty())
+            name = "the lil' God Projector";
+        juce::String error;
+        if (engine.saveStoredGroove(name, error))
+        {
+            projectName.setText(engine.state().name, false);
+            evolutionStatus.setText("SAVED AS · " + engine.state().name, juce::dontSendNotification);
+        }
+        else
+        {
+            evolutionStatus.setText("Save failed: " + error, juce::dontSendNotification);
+        }
+    }), true);
+}
+
+void MainComponent::saveGrooveAsFile()
+{
+    captureSessionIntoState();
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Save Groove",
+        engine.groovesDir().getChildFile(engine.legalGrooveName(engine.state().name) + ".groove.json"),
+        "*.groove.json;*.json");
+    const auto flags = juce::FileBrowserComponent::saveMode
+                     | juce::FileBrowserComponent::canSelectFiles
+                     | juce::FileBrowserComponent::warnAboutOverwriting;
+    fileChooser->launchAsync(flags, [this](const juce::FileChooser& fc)
+    {
+        auto file = fc.getResult();
+        if (file.getFullPathName().isEmpty())
+            return;
+        if (! file.hasFileExtension(".json"))
+            file = file.withFileExtension("groove.json");
+        juce::String error;
+        if (engine.saveGrooveFile(file, error))
+        {
+            projectName.setText(engine.state().name, false);
+            evolutionStatus.setText("SAVED FILE · " + file.getFileName(), juce::dontSendNotification);
+        }
+        else
+            evolutionStatus.setText("Save failed: " + error, juce::dontSendNotification);
+    });
+}
+
+void MainComponent::loadGrooveFromFile(const juce::File& file)
+{
+    juce::String error;
+    if (! engine.loadGrooveFile(file, error))
+    {
+        evolutionStatus.setText("Load failed: " + error, juce::dontSendNotification);
+        return;
+    }
+    applyLoadedSession();
+    evolutionStatus.setText("LOADED · " + engine.state().name, juce::dontSendNotification);
+}
+
+void MainComponent::newGroove()
+{
+    engine.newProject();
+    applyLoadedSession();
+    evolutionStatus.setText("NEW GROOVE", juce::dontSendNotification);
+}
+
+void MainComponent::showLoadMenu()
+{
+    juce::PopupMenu menu;
+    const auto stored = engine.listStoredGrooves();
+    juce::Array<juce::File> files;
+    if (stored.isEmpty())
+        menu.addItem(1, "(No saved grooves yet)", false, false);
+    else
+    {
+        for (const auto& item : stored)
+        {
+            files.add(item.file);
+            menu.addItem(files.size(), item.name);
+        }
+    }
+    menu.addSeparator();
+    menu.addItem(1000, "New Groove");
+    menu.addItem(1001, "Open File...");
+    menu.addItem(1002, "Export File...");
+    menu.addItem(1003, "Reveal Store Folder");
+
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&loadButton),
+        [this, files](int result)
+        {
+            if (result == 1000) { newGroove(); return; }
+            if (result == 1001)
+            {
+                fileChooser = std::make_unique<juce::FileChooser>(
+                    "Open Groove", engine.groovesDir(), "*.groove.json;*.json");
+                const auto flags = juce::FileBrowserComponent::openMode
+                                 | juce::FileBrowserComponent::canSelectFiles;
+                fileChooser->launchAsync(flags, [this](const juce::FileChooser& fc)
+                {
+                    const auto file = fc.getResult();
+                    if (file.existsAsFile())
+                        loadGrooveFromFile(file);
+                });
+                return;
+            }
+            if (result == 1002) { saveGrooveAsFile(); return; }
+            if (result == 1003)
+            {
+                engine.groovesDir().revealToUser();
+                return;
+            }
+            if (result >= 1 && result <= files.size())
+                loadGrooveFromFile(files[result - 1]);
+        });
 }
 
 void MainComponent::refreshMidiOutputs()
@@ -510,8 +842,9 @@ bool MainComponent::importDroppedMidi(const juce::StringArray& files)
         {
             evolutionStatus.setText("Loaded UJAM phrase · " + f.getFileName(),
                                     juce::dontSendNotification);
-            if (t1View)
+            if (currentPage == 1)
                 torsoPage.refreshFromEngine();
+            songPage.refreshFromEngine();
             refreshFromSelection();
             repaint();
             return true;
@@ -534,10 +867,8 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
         repaint();
         return true;
     }
-    if (key.getKeyCode() == 's' || key.getKeyCode() == 'S')
+    if ((key.getKeyCode() == 's' || key.getKeyCode() == 'S') && ! key.getModifiers().isCommandDown())
     {
-        if (key.getModifiers().isCommandDown())
-            return false;
         engine.toggleSolo(engine.state().selectedTrack);
         repaint();
         return true;
@@ -546,6 +877,25 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
         || key == juce::KeyPress(',', juce::ModifierKeys::ctrlModifier, 0))
     {
         showPreferences();
+        return true;
+    }
+    if (key == juce::KeyPress('s', juce::ModifierKeys::commandModifier, 0)
+        || key == juce::KeyPress('s', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0))
+    {
+        if (key.getModifiers().isShiftDown())
+            saveGrooveAs();
+        else
+            saveCurrentGroove();
+        return true;
+    }
+    if (key == juce::KeyPress('o', juce::ModifierKeys::commandModifier, 0))
+    {
+        showLoadMenu();
+        return true;
+    }
+    if (key == juce::KeyPress('n', juce::ModifierKeys::commandModifier, 0))
+    {
+        newGroove();
         return true;
     }
     return false;
@@ -583,7 +933,19 @@ void MainComponent::drawGrid(juce::Graphics& g)
 {
     auto area=sequencerPanel.reduced(10); area.removeFromTop(gridTopPad); area.removeFromBottom(gridBottomPad); auto labels=area.removeFromLeft(gridLabelWidth);
     float sw=(float)area.getWidth()/groove::kSteps, rh=(float)area.getHeight()/groove::kTracks; const auto& state=engine.state();
-    for(int s=0;s<groove::kSteps;++s) if(s%4==0){ g.setColour(juce::Colour(0xff728b99)); g.setFont(juce::FontOptions(9.0f)); g.drawText(juce::String(s+1),area.getX()+(int)(s*sw),area.getY()-19,30,16,juce::Justification::centredLeft); }
+    const auto meter = state.meter;
+    for (int s = 0; s < groove::kSteps; ++s)
+    {
+        if (! groove::meterIsBeatLine(meter, s) && ! groove::meterIsBarLine(meter, s))
+            continue;
+        const bool bar = groove::meterIsBarLine(meter, s);
+        g.setColour(bar ? juce::Colour(0xff9ec4d8) : juce::Colour(0xff6a8796));
+        g.setFont(juce::FontOptions(bar ? 10.0f : 9.0f, bar ? juce::Font::bold : juce::Font::plain));
+        g.drawText(juce::String(s + 1), area.getX() + (int) (s * sw), area.getY() - 19, 30, 16,
+                   juce::Justification::centredLeft);
+        g.setColour(bar ? juce::Colour(0xff4a7a94).withAlpha(0.55f) : juce::Colour(0xff2a4452).withAlpha(0.45f));
+        g.fillRect((float) area.getX() + s * sw, (float) area.getY(), bar ? 2.0f : 1.0f, (float) area.getHeight());
+    }
     for(int t=0;t<groove::kTracks;++t)
     {
         int y=area.getY()+(int)(t*rh); auto lr=juce::Rectangle<int>(labels.getX(),y,labels.getWidth()-6,(int)rh-3); auto c=trackColour(t);
@@ -624,22 +986,23 @@ void MainComponent::drawAncestry(juce::Graphics& g,juce::Rectangle<int> r)
 void MainComponent::paint(juce::Graphics& g)
 {
     g.fillAll(juce::Colour(0xff050c12)); g.setColour(juce::Colour(0xff08131c)); g.fillRect(0,0,getWidth(),72);
-    g.setColour(juce::Colour(0xffff8a22));g.setFont(juce::FontOptions(26.0f,juce::Font::bold));g.drawText("G",22,17,32,34,juce::Justification::centred);
-    g.setColour(juce::Colour(0xffe6f0f5));g.setFont(juce::FontOptions(20.0f,juce::Font::bold));g.drawText("GROOVE LAB",61,16,170,34,juce::Justification::centredLeft);
-
-    if (! t1View)
     {
-        drawPanel(g,sequencerPanel,"SEQUENCER · CLICK LABEL TO SELECT · ⌘ MUTE · ⌥ SOLO"); drawPanel(g,inspectorPanel,"TRACK GENERATOR / STEP EDIT"); drawPanel(g,soundPanel,"SOUND"); drawPanel(g,evolutionPanel,"EVOLUTION"); drawPanel(g,rulesPanel,"RULES"); drawPanel(g,ancestryPanel,"ANCESTRY"); drawGrid(g); drawAncestry(g,ancestryPanel);
+        auto icon = juce::ImageCache::getFromMemory(BinaryData::GrooveLabIcon_png,
+                                                    BinaryData::GrooveLabIcon_pngSize);
+        g.drawImageWithin(icon, 12, 12, 48, 48, juce::RectanglePlacement::centred);
+    }
+    g.setColour(juce::Colour(0xffe6f0f5));g.setFont(juce::FontOptions(16.0f,juce::Font::bold));g.drawText("the lil' God Projector",66,16,236,34,juce::Justification::centredLeft);
+
+    if (currentPage == 0)
+    {
+        drawPanel(g,sequencerPanel,"SEQUENCER · " + juce::String(groove::meterName(engine.state().meter))
+                  + "  ·  CLICK LABEL TO SELECT · ⌘ MUTE · ⌥ SOLO"); drawPanel(g,inspectorPanel,"TRACK GENERATOR / STEP EDIT"); drawPanel(g,soundPanel,"SOUND"); drawPanel(g,evolutionPanel,"EVOLUTION"); drawPanel(g,rulesPanel,"RULES"); drawPanel(g,ancestryPanel,"ANCESTRY"); drawGrid(g); drawAncestry(g,ancestryPanel);
         g.setColour(juce::Colour(0xff829bab)); g.setFont(juce::FontOptions(10.0f));
         auto ip = inspectorPanel.reduced(14); ip.removeFromTop(68);
         g.drawText("STEPS", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft); ip.removeFromTop(28);
         g.drawText("PULSES", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft); ip.removeFromTop(28);
         g.drawText("ROTATE", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft); ip.removeFromTop(28);
         g.drawText("DIVISION", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft);
-        auto rp = rulesPanel.reduced(14); rp.removeFromTop(38);
-        g.drawText("POLICY", rp.getX(), rp.getY(), 80, 18, juce::Justification::centredLeft); rp.removeFromTop(42);
-        g.drawText("TRACK PROB", rp.getX(), rp.getY(), 90, 18, juce::Justification::centredLeft); rp.removeFromTop(34);
-        g.drawText("TRACK VEL", rp.getX(), rp.getY(), 90, 18, juce::Justification::centredLeft);
     }
 
     g.setColour(juce::Colour(0xff112631));g.fillRect(0,getHeight()-34,getWidth(),34);
@@ -660,61 +1023,65 @@ void MainComponent::resized()
     int margin=12,header=72,foot=34,rightW=330,gap=10,lowerH=282; auto content=getLocalBounds().withTrimmedTop(header).withTrimmedBottom(foot).reduced(margin,8); auto right=content.removeFromRight(rightW);content.removeFromRight(gap);auto bottom=content.removeFromBottom(lowerH);content.removeFromBottom(gap);sequencerPanel=content;inspectorPanel=right.removeFromTop(500);right.removeFromTop(gap);ancestryPanel=right;
     auto left=bottom.removeFromLeft((int)(bottom.getWidth()*0.46f));bottom.removeFromLeft(gap);auto mid=bottom.removeFromLeft((int)(bottom.getWidth()*0.46f));bottom.removeFromLeft(gap);soundPanel=left;evolutionPanel=mid;rulesPanel=bottom;
 
-    const int hy = 19, hh = 32, hg = 8;
-    int x = 238;
+    const int hy = 19, hh = 32, hg = 6;
+    int x = 308;
     auto placeLeft = [&](juce::Component& c, int w)
     {
         c.setBounds(x, hy, w, hh);
         x += w + hg;
     };
-    projectLabel.setBounds(x, 18, 82, 34); x += 82 + hg;
-    placeLeft(captureButton, 74);
-    placeLeft(backButton, 56);
-    placeLeft(resetButton, 56);
-    placeLeft(playButton, 70);
-    placeLeft(performButton, 80);
-    placeLeft(commitPerformButton, 102);
-    bpmLabel.setBounds(x, hy, 32, hh);
-    x += 32 + 4;
-    bpm.setBounds(x, hy, 168, hh);
-    const int leftEnd = x + 168;
+    projectName.setBounds(x, hy, 128, hh); x += 128 + hg;
+    placeLeft(saveButton, 48);
+    placeLeft(saveAsButton, 70);
+    placeLeft(loadButton, 48);
+    placeLeft(captureButton, 64);
+    placeLeft(backButton, 50);
+    placeLeft(resetButton, 52);
+    placeLeft(playButton, 60);
+    placeLeft(performButton, 72);
+    placeLeft(commitPerformButton, 80);
+    bpmLabel.setBounds(x, hy, 28, hh);
+    x += 28 + 2;
+    int bpmW = 118;
 
-    int midiW = 150, srcW = 110;
-    int rightNeed = 54 + hg + 52 + hg + 94 + hg + srcW + hg + 78 + hg + 56 + hg + midiW;
-    int spare = getWidth() - 12 - leftEnd - 12 - rightNeed;
-    if (spare < 0)
+    int midiW = 120, srcW = 100;
+    const int pageW = 50 + hg + 50 + hg + 88 + hg + 50;
+    int toolsW = srcW + hg + 72 + hg + 52 + hg + midiW;
+    int rightNeed = pageW + hg + toolsW;
+    int meterW = 58;
+    int leftEnd = x + bpmW + 4 + 40 + 4 + meterW;
+    int startPages = getWidth() - 12 - rightNeed;
+    if (startPages < leftEnd + 8)
     {
-        const int cut = juce::jmin(-spare, midiW - 108);
-        midiW -= cut;
-        spare += cut;
-        if (spare < 0)
-        {
-            const int cutSrc = juce::jmin(-spare, srcW - 92);
-            srcW -= cutSrc;
-        }
+        bpmW = juce::jmax(72, bpmW - (leftEnd + 8 - startPages));
+        leftEnd = x + bpmW + 4 + 40 + 4 + meterW;
+        startPages = juce::jmax(leftEnd + 8, getWidth() - 12 - rightNeed);
     }
+    bpm.setBounds(x, hy, bpmW, hh);
+    x += bpmW + 4;
+    meterLabel.setBounds(x, hy, 40, hh);
+    x += 40 + 4;
+    meterBox.setBounds(x, hy, meterW, hh);
 
-    int rx = getWidth() - 12;
-    auto placeRight = [&](juce::Component& c, int w)
+    int px = startPages;
+    auto place = [&](juce::Component& c, int w)
     {
-        rx -= w;
-        c.setBounds(rx, hy, w, hh);
-        rx -= hg;
+        c.setBounds(px, hy, w, hh);
+        px += w + hg;
     };
-    placeRight(midiOutBox, midiW);
-    placeRight(showPluginButton, 56);
-    placeRight(loadPluginButton, 78);
-    placeRight(soundSource, srcW);
-    placeRight(pageT1Button, 94);
-    placeRight(pageGridButton, 52);
-    placeRight(prefsButton, 54);
-
-    if (prefsButton.getX() < leftEnd + 10)
-        prefsButton.setBounds(leftEnd + 10, hy, 54, hh);
+    place(prefsButton, 50);
+    place(pageGridButton, 50);
+    place(pageT1Button, 88);
+    place(pageSongButton, 50);
+    place(soundSource, srcW);
+    place(loadPluginButton, 72);
+    place(showPluginButton, 52);
+    place(midiOutBox, midiW);
 
     torsoPage.setBounds(getLocalBounds().withTrimmedTop(72).withTrimmedBottom(34));
+    songPage.setBounds(getLocalBounds().withTrimmedTop(72).withTrimmedBottom(34));
     footer.setBounds(20,getHeight()-31,getWidth()-40,26);
-    if (t1View)
+    if (currentPage != 0)
         return;
 
     auto ins=inspectorPanel.reduced(14);ins.removeFromTop(42);selectedLabel.setBounds(ins.removeFromTop(26));
@@ -733,7 +1100,16 @@ void MainComponent::resized()
 
     auto ep=evolutionPanel.reduced(14);ep.removeFromTop(46); auto a=ep.removeFromTop(31);similarity.setBounds(a.withTrimmedLeft(95));auto b=ep.removeFromTop(35);surprise.setBounds(b.withTrimmedLeft(95).removeFromLeft(70));auto c=ep.removeFromTop(35);lockResistance.setBounds(c.withTrimmedLeft(95));auto d=ep.removeFromTop(35);evolveAmount.setBounds(d.withTrimmedLeft(95));auto buttons=ep.removeFromBottom(70);int bw=juce::jmax(58,buttons.getWidth()/5);sparse.setBounds(buttons.removeFromLeft(bw).reduced(2));syncopate.setBounds(buttons.removeFromLeft(bw).reduced(2));human.setBounds(buttons.removeFromLeft(bw).reduced(2));dense.setBounds(buttons.removeFromLeft(bw).reduced(2));soundEvolve.setBounds(buttons.removeFromLeft(bw).reduced(2));evolutionStatus.setBounds(evolutionPanel.getX()+14,evolutionPanel.getBottom()-30,evolutionPanel.getWidth()-28,20);
 
-    auto rp=rulesPanel.reduced(14);rp.removeFromTop(48);evolvePolicy.setBounds(rp.removeFromTop(30));rp.removeFromTop(8);trackProbability.setBounds(rp.removeFromTop(34));trackVelocity.setBounds(rp.removeFromTop(34));
+    auto rp=rulesPanel.reduced(12);
+    rp.removeFromTop(40);
+    policyLabel.setBounds(rp.removeFromTop(16));
+    evolvePolicy.setBounds(rp.removeFromTop(28));
+    rp.removeFromTop(10);
+    trackProbLabel.setBounds(rp.removeFromTop(16));
+    trackProbability.setBounds(rp.removeFromTop(26));
+    rp.removeFromTop(10);
+    trackVelLabel.setBounds(rp.removeFromTop(16));
+    trackVelocity.setBounds(rp.removeFromTop(26));
 }
 
 void MainComponent::refreshFromSelection()
@@ -745,13 +1121,17 @@ void MainComponent::refreshFromSelection()
     soundSliders[(int)groove::Param::pitch].setValue(p.pitchHz,juce::dontSendNotification);soundSliders[(int)groove::Param::decay].setValue(p.decayMs,juce::dontSendNotification);soundSliders[(int)groove::Param::transient].setValue(p.transient,juce::dontSendNotification);soundSliders[(int)groove::Param::noise].setValue(p.noise,juce::dontSendNotification);soundSliders[(int)groove::Param::filter].setValue(p.filter,juce::dontSendNotification);soundSliders[(int)groove::Param::drive].setValue(p.drive,juce::dontSendNotification);soundSliders[(int)groove::Param::space].setValue(p.space,juce::dontSendNotification);soundSliders[(int)groove::Param::blend].setValue(p.blend,juce::dontSendNotification);
     velocity.setValue(ss.velocity,juce::dontSendNotification);midiNote.setValue((double)st.effectiveMidiNote(t,s),juce::dontSendNotification);probability.setValue(ss.probability,juce::dontSendNotification);ratchet.setSelectedId(ss.ratchet,juce::dontSendNotification);role.setSelectedId((int)ss.role+1,juce::dontSendNotification);
     trackSteps.setSelectedId(tr.generatorSteps,juce::dontSendNotification);trackPulses.setSelectedId(tr.pulses+1,juce::dontSendNotification);int rr=((tr.rotate%tr.generatorSteps)+tr.generatorSteps)%tr.generatorSteps;trackRotate.setSelectedId(rr+1,juce::dontSendNotification);int did=tr.division<0.375f?1:tr.division<0.75f?2:tr.division<1.5f?3:tr.division<3.0f?4:5;trackDivision.setSelectedId(did,juce::dontSendNotification);trackProbability.setValue(tr.probability,juce::dontSendNotification);trackVelocity.setValue(tr.velocity,juce::dontSendNotification);
-    evolvePolicy.setSelectedId((int)tr.evolutionPolicy+1,juce::dontSendNotification);evolveAmount.setValue(tr.evolveAmount,juce::dontSendNotification);similarity.setValue(st.similarity,juce::dontSendNotification);lockResistance.setValue(st.lockResistance,juce::dontSendNotification);surprise.setSelectedId(st.surpriseBudget,juce::dontSendNotification);bpm.setValue(st.bpm,juce::dontSendNotification);refreshing=false;
+    evolvePolicy.setSelectedId((int)tr.evolutionPolicy+1,juce::dontSendNotification);evolveAmount.setValue(tr.evolveAmount,juce::dontSendNotification);similarity.setValue(st.similarity,juce::dontSendNotification);lockResistance.setValue(st.lockResistance,juce::dontSendNotification);surprise.setSelectedId(st.surpriseBudget,juce::dontSendNotification);bpm.setValue(st.bpm,juce::dontSendNotification);
+    meterBox.setSelectedId((int) st.meter + 1, juce::dontSendNotification);
+    if (! projectName.hasKeyboardFocus(true))
+        projectName.setText(st.name, false);
+    refreshing=false;
 }
 
 void MainComponent::mouseDown(const juce::MouseEvent& e)
 {
     grabKeyboardFocus();
-    if (t1View) return;
+    if (currentPage != 0) return;
     if (! sequencerPanel.contains(e.getPosition())) return;
 
     auto area = sequencerPanel.reduced(10);
@@ -788,21 +1168,26 @@ void MainComponent::mouseDown(const juce::MouseEvent& e)
 void MainComponent::timerCallback()
 {
     playButton.setButtonText(engine.isPlaying()?"STOP":"PLAY");
-    if (! t1View)
+    meterBox.setSelectedId((int) engine.state().meter + 1, juce::dontSendNotification);
+    if (currentPage == 0)
         repaint();
 }
 
-void MainComponent::setT1View(bool on)
+void MainComponent::setPage(int page)
 {
-    t1View = on;
-    pageGridButton.setToggleState(! on, juce::dontSendNotification);
-    pageT1Button.setToggleState(on, juce::dontSendNotification);
-    torsoPage.setVisible(on);
-    if (on)
+    currentPage = juce::jlimit(0, 2, page);
+    pageGridButton.setToggleState(currentPage == 0, juce::dontSendNotification);
+    pageT1Button.setToggleState(currentPage == 1, juce::dontSendNotification);
+    pageSongButton.setToggleState(currentPage == 2, juce::dontSendNotification);
+    torsoPage.setVisible(currentPage == 1);
+    songPage.setVisible(currentPage == 2);
+    if (currentPage == 1)
         torsoPage.refreshFromEngine();
+    else if (currentPage == 2)
+        songPage.refreshFromEngine();
     else
         refreshFromSelection();
-    setLabPageVisible(! on);
+    setLabPageVisible(currentPage == 0);
     resized();
     repaint();
 }
@@ -813,7 +1198,7 @@ void MainComponent::setLabPageVisible(bool on)
             &auditionButton, &clearLocks, &sparse, &syncopate, &human, &dense, &soundEvolve,
             &soundScope, &soundScopeLabel, &velocity, &midiNote, &probability, &ratchet, &role,
             &trackSteps, &trackPulses, &trackRotate, &trackDivision, &trackProbability, &trackVelocity,
-            &evolvePolicy, &evolveAmount, &similarity, &lockResistance, &surprise,
+            &evolvePolicy, &policyLabel, &trackProbLabel, &trackVelLabel, &evolveAmount, &similarity, &lockResistance, &surprise,
             &selectedLabel, &evolutionStatus})
         c->setVisible(on);
 

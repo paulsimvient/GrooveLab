@@ -5,6 +5,7 @@
 #include "../Audio/ExternalPluginHost.h"
 #include "GrooveLookAndFeel.h"
 #include "TorsoPage.h"
+#include "SongPage.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::FileDragAndDropTarget,
@@ -41,26 +42,36 @@ private:
     void drawGrid(juce::Graphics&);
     void drawAncestry(juce::Graphics&, juce::Rectangle<int>);
     void toggleTransport();
-    void setT1View(bool on);
+    void setPage(int page); // 0 GRID, 1 EUCLIDEAN, 2 SONG
     void setLabPageVisible(bool on);
     void choosePluginFile();
     void browseForPlugin();
     void loadPluginFromFile(const juce::File&);
+    void tryLoadUjamHot();
     void refreshMidiOutputs();
     void showPreferences();
     void saveAudioSettings();
     static juce::File audioSettingsFile();
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
     bool importDroppedMidi(const juce::StringArray& files);
+    void captureSessionIntoState();
+    void applyLoadedSession();
+    void saveCurrentGroove();
+    void saveGrooveAs();
+    void saveGrooveAsFile();
+    void showLoadMenu();
+    void loadGrooveFromFile(const juce::File&);
+    void newGroove();
 
     groove::GrooveEngine engine;
     groove::ExternalPluginHost pluginHost;
     std::unique_ptr<juce::MidiOutput> midiOutput;
     std::unique_ptr<juce::FileChooser> fileChooser;
     juce::Array<juce::MidiDeviceInfo> midiDevices;
-    std::atomic<int> soundMode { 1 };
+    std::atomic<int> soundMode { 2 };
     GrooveLookAndFeel look;
     TorsoPage torsoPage { engine };
+    SongPage songPage { engine };
 
     juce::TextButton playButton { "PLAY" };
     juce::TextButton resetButton { "RESET" };
@@ -71,13 +82,20 @@ private:
     juce::TextButton commitPerformButton { "CAPTURE TEMP" };
     juce::TextButton pageGridButton { "GRID" };
     juce::TextButton pageT1Button { "EUCLIDEAN" };
+    juce::TextButton pageSongButton { "SONG" };
     juce::TextButton prefsButton { "PREFS" };
+    juce::TextButton saveButton { "SAVE" };
+    juce::TextButton saveAsButton { "SAVE AS" };
+    juce::TextButton loadButton { "LOAD" };
     juce::ComboBox soundSource;
     juce::TextButton loadPluginButton { "LOAD VST" };
     juce::TextButton showPluginButton { "UJAM UI" };
     juce::ComboBox midiOutBox;
     juce::Slider bpm;
-    juce::Label bpmLabel, projectLabel;
+    juce::Label bpmLabel;
+    juce::ComboBox meterBox;
+    juce::Label meterLabel;
+    juce::TextEditor projectName;
 
     std::array<juce::Slider, groove::paramCount> soundSliders;
     std::array<juce::Label, groove::paramCount> soundLabels;
@@ -93,6 +111,7 @@ private:
     juce::ComboBox trackSteps, trackPulses, trackRotate, trackDivision;
     juce::Slider trackProbability, trackVelocity;
     juce::ComboBox evolvePolicy;
+    juce::Label policyLabel, trackProbLabel, trackVelLabel;
     juce::Slider evolveAmount;
 
     juce::Slider similarity, lockResistance;
@@ -101,7 +120,7 @@ private:
 
     juce::Label selectedLabel, evolutionStatus, footer;
     bool refreshing = false;
-    bool t1View = false;
+    int currentPage = 0; // 0 GRID, 1 EUCLIDEAN, 2 SONG
     bool midiDragOver = false;
 
     juce::Rectangle<int> sequencerPanel, inspectorPanel, soundPanel, evolutionPanel, rulesPanel, ancestryPanel;

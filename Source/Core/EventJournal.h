@@ -18,6 +18,7 @@ public:
     void append(const juce::String& type, const juce::String& detail);
     juce::File getJournalFile() const;
     juce::File getStateFile() const;
+    juce::File getGroovesDir() const;
     juce::File getAppDataDir() const;
 
 private:

@@ -9,9 +9,18 @@ public:
     GrooveState();
 
     std::array<Track, kTracks> tracks {};
+    Song song;
+    juce::String name { "the lil' God Projector" };
+    juce::String lastPluginPath;
+    int soundMode = 2;
     double bpm = 124.0;
+    Meter meter = Meter::fourFour;
     int selectedTrack = 0;
     int selectedStep = 0;
+
+    void seedDefaultSong();
+    void applySongSection(int index);
+    void captureLiveToCurrentSection();
 
     float similarity = 0.82f;       // 0 = radical, 1 = nearly identical
     int surpriseBudget = 3;         // max meaningful changes per evolve
