@@ -1038,10 +1038,10 @@ juce::String GrooveEngine::legalGrooveName(const juce::String& name)
 {
     auto n = name.trim();
     if (n.isEmpty())
-        n = "the lil' God Projector";
+        n = "Lil God Projector";
     n = juce::File::createLegalFileName(n);
     if (n.isEmpty())
-        n = "the lil God Projector";
+        n = "Lil God Projector";
     return n;
 }
 
@@ -1208,9 +1208,13 @@ void GrooveEngine::newProject()
         const juce::ScopedLock sl(stateLock);
         const auto keepPlugin = grooveState.lastPluginPath;
         const int keepMode = grooveState.soundMode;
+        const int keepProgram = grooveState.lastPluginProgram;
+        const auto keepPatch = grooveState.lastPluginPatch;
         grooveState = GrooveState();
         grooveState.lastPluginPath = keepPlugin;
         grooveState.soundMode = keepMode;
+        grooveState.lastPluginProgram = keepProgram;
+        grooveState.lastPluginPatch = keepPatch;
         ancestryGraph = {};
         sequencer.reset();
         songSamplesInSection = 0.0;

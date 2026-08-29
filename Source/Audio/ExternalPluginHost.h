@@ -1,5 +1,7 @@
 #pragma once
 #include <JuceHeader.h>
+#include <atomic>
+#include <vector>
 
 namespace groove
 {
@@ -18,6 +20,15 @@ public:
     juce::String getName() const;
     juce::File getFile() const;
 
+    int getKitCount() const;
+    int getKitIndex() const;
+    juce::String getKitName(int index) const;
+    juce::String getCurrentPatchName() const;
+    juce::String getStyleName() const;
+    void setKitIndex(int index);
+    bool setKitByName(const juce::String& name);
+    void stepKit(int delta);
+
     void showEditor();
     void hideEditor();
     bool isEditorOpen() const noexcept { return editorWindow != nullptr; }
@@ -28,9 +39,22 @@ public:
 private:
     class EditorWindow;
 
+    struct PatchEntry
+    {
+        juce::File file;
+        juce::String name;
+        juce::String category;
+        juce::String styleName;
+        bool uniqueName = true;
+    };
+
     void configureBuses(juce::AudioPluginInstance&);
     void captureSnareBus(juce::AudioPluginInstance&);
     void mixToStereo(juce::AudioBuffer<float>& dest, const juce::AudioBuffer<float>& src) const;
+    juce::AudioProcessorParameter* kitParameter() const;
+    void scanUjamPatches();
+    void applyPatchFile(const juce::File&);
+    void guessCurrentPatchFromLiveState();
 
     juce::AudioPluginFormatManager formatManager;
     std::unique_ptr<juce::AudioPluginInstance> plugin;
@@ -40,9 +64,13 @@ private:
     int blockSize = 512;
     juce::AudioBuffer<float> pluginBuffer;
     juce::File pluginFile;
+    std::vector<PatchEntry> patches;
+    int currentPatch = 0;
     int snareBusChannel = -1;
     int snareBusChannels = 0;
     uint32_t editorGeneration = 0;
+    std::atomic<int> pendingProgramChange { -1 };
+    std::atomic<int> lastMidiProgram { 0 };
     void presentEditorNow();
 };
 }

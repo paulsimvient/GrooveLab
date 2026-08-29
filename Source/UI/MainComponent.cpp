@@ -118,7 +118,7 @@ MainComponent::MainComponent()
     addAndMakeVisible(meterBox);
 
     for (auto* b : {&playButton,&resetButton,&captureButton,&backButton,&auditionButton,&performButton,&commitPerformButton,
-                    &clearLocks,&sparse,&syncopate,&human,&dense,&soundEvolve,&pageGridButton,&pageT1Button,&pageSongButton,&prefsButton,&saveButton,&saveAsButton,&loadButton}) addAndMakeVisible(*b);
+                    &clearLocks,&sparse,&syncopate,&human,&dense,&soundEvolve,&pageGridButton,&pageT1Button,&pageSongButton,&saveButton,&saveAsButton,&loadButton}) addAndMakeVisible(*b);
 
     pageGridButton.setClickingTogglesState(true);
     pageT1Button.setClickingTogglesState(true);
@@ -130,45 +130,13 @@ MainComponent::MainComponent()
     pageGridButton.onClick = [this] { setPage(0); };
     pageT1Button.onClick = [this] { setPage(1); };
     pageSongButton.onClick = [this] { setPage(2); };
-    prefsButton.onClick = [this] { showPreferences(); };
     saveButton.onClick = [this] { saveCurrentGroove(); };
     saveAsButton.onClick = [this] { saveGrooveAs(); };
     loadButton.onClick = [this] { showLoadMenu(); };
 
-    soundSource.addItem("INTERNAL", 1);
-    soundSource.addItem("UJAM / VST", 2);
-    soundSource.addItem("BOTH", 3);
-    soundSource.setSelectedId(2, juce::dontSendNotification);
     engine.setInternalSynthEnabled(false);
     soundMode.store(2);
-    soundSource.onChange = [this]
-    {
-        const int id = soundSource.getSelectedId();
-        soundMode.store(id);
-        engine.setInternalSynthEnabled(id != 2);
-        if (id >= 2 && ! pluginHost.isLoaded())
-            evolutionStatus.setText("Click LOAD VST — UJAM is listed as Virtual Drummer / Beatmaker", juce::dontSendNotification);
-    };
-    loadPluginButton.onClick = [this] { choosePluginFile(); };
-    showPluginButton.onClick = [this]
-    {
-        if (pluginHost.isLoaded())
-            pluginHost.showEditor();
-        else
-            choosePluginFile();
-    };
-    addAndMakeVisible(soundSource);
-    addAndMakeVisible(loadPluginButton);
-    addAndMakeVisible(showPluginButton);
-    addAndMakeVisible(midiOutBox);
     refreshMidiOutputs();
-    midiOutBox.onChange = [this]
-    {
-        midiOutput.reset();
-        const int id = midiOutBox.getSelectedId();
-        if (id > 1 && id - 2 < midiDevices.size())
-            midiOutput = juce::MidiOutput::openDevice(midiDevices[id - 2].identifier);
-    };
 
     addAndMakeVisible(torsoPage);
     torsoPage.setVisible(false);
@@ -240,6 +208,54 @@ MainComponent::MainComponent()
         }
     };
     addAndMakeVisible(soundScope);
+
+    vstKitBox.setTextWhenNothingSelected("SOUND  ·  click to switch");
+    vstKitBox.setJustificationType(juce::Justification::centredLeft);
+    vstKitBox.onChange = [this]
+    {
+        if (refreshing) return;
+        const int id = vstKitBox.getSelectedId();
+        if (id <= 0) return;
+        pluginHost.setKitIndex(id - 1);
+        engine.state().lastPluginProgram = id - 1;
+        engine.state().lastPluginPatch = pluginHost.getCurrentPatchName();
+        auto status = pluginHost.getKitName(id - 1);
+        const auto style = pluginHost.getStyleName();
+        if (style.isNotEmpty())
+            status += "  ·  " + style;
+        evolutionStatus.setText("SOUND · " + status, juce::dontSendNotification);
+    };
+    vstKitPrev.onClick = [this]
+    {
+        pluginHost.stepKit(-1);
+        engine.state().lastPluginProgram = pluginHost.getKitIndex();
+        engine.state().lastPluginPatch = pluginHost.getCurrentPatchName();
+        refreshVstKitUi(false);
+        auto status = pluginHost.getKitName(pluginHost.getKitIndex());
+        const auto style = pluginHost.getStyleName();
+        if (style.isNotEmpty())
+            status += "  ·  " + style;
+        evolutionStatus.setText("SOUND · " + status, juce::dontSendNotification);
+    };
+    vstKitNext.onClick = [this]
+    {
+        pluginHost.stepKit(1);
+        engine.state().lastPluginProgram = pluginHost.getKitIndex();
+        engine.state().lastPluginPatch = pluginHost.getCurrentPatchName();
+        refreshVstKitUi(false);
+        auto status = pluginHost.getKitName(pluginHost.getKitIndex());
+        const auto style = pluginHost.getStyleName();
+        if (style.isNotEmpty())
+            status += "  ·  " + style;
+        evolutionStatus.setText("SOUND · " + status, juce::dontSendNotification);
+    };
+    vstKitPrev.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1a3a4e));
+    vstKitNext.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1a3a4e));
+    vstKitPrev.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffffffff));
+    vstKitNext.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffffffff));
+    addAndMakeVisible(vstKitBox);
+    addAndMakeVisible(vstKitPrev);
+    addAndMakeVisible(vstKitNext);
 
     clearLocks.onClick=[this]
     {
@@ -322,12 +338,19 @@ MainComponent::MainComponent()
     setAudioChannels(0, 2, settingsXml.get());
     deviceManager.addChangeListener(this);
     applyLoadedSession();
-    setSize(1600,900); refreshFromSelection(); startTimerHz(30);
+    setSize(1600,900); refreshFromSelection(); refreshVstKitUi(true); startTimerHz(30);
     playButton.setButtonText(engine.isPlaying()?"STOP":"PLAY");
+#if JUCE_MAC
+    extraAppleMenu.addItem(200, "Preferences...");
+    juce::MenuBarModel::setMacMainMenu(this, &extraAppleMenu);
+#endif
 }
 
 MainComponent::~MainComponent()
 {
+#if JUCE_MAC
+    juce::MenuBarModel::setMacMainMenu(nullptr);
+#endif
     deviceManager.removeChangeListener(this);
     saveAudioSettings();
     shutdownAudio();
@@ -363,50 +386,127 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& info)
         midiOutput->sendBlockOfMessagesNow(midi);
 }
 
-void MainComponent::choosePluginFile()
+void MainComponent::setSoundMode(int mode)
+{
+    const int id = juce::jlimit(1, 3, mode);
+    soundMode.store(id);
+    engine.setInternalSynthEnabled(id != 2);
+    engine.state().soundMode = id;
+}
+
+void MainComponent::setMidiOutput(int deviceIndex)
+{
+    midiOutput.reset();
+    midiOutIndex = -1;
+    if (deviceIndex < 0 || deviceIndex >= midiDevices.size())
+        return;
+    midiOutIndex = deviceIndex;
+    midiOutput = juce::MidiOutput::openDevice(midiDevices[deviceIndex].identifier);
+}
+
+juce::StringArray MainComponent::getMenuBarNames()
+{
+    return { "File", "Sound", "MIDI" };
+}
+
+juce::PopupMenu MainComponent::getMenuForIndex(int topLevelIndex, const juce::String&)
 {
     juce::PopupMenu menu;
-    juce::Array<juce::File> files;
-
-    const auto vst3Dir = juce::File("/Library/Audio/Plug-Ins/VST3");
-    const auto auDir = juce::File("/Library/Audio/Plug-Ins/Components");
-
-    auto addUjam = [&](const juce::String& stem, const juce::String& label)
+    if (topLevelIndex == 0)
     {
-        const auto vst3 = vst3Dir.getChildFile(stem + ".vst3");
-        const auto au = auDir.getChildFile(stem + ".component");
-        const auto file = vst3.exists() ? vst3 : au;
-        if (! file.exists())
-            return;
-        files.add(file);
-        menu.addItem(files.size(), label);
-    };
+        menu.addItem(230, "New Groove");
+        menu.addItem(231, "Open...");
+        menu.addSeparator();
+        menu.addItem(232, "Save");
+        menu.addItem(233, "Save As...");
+#if ! JUCE_MAC
+        menu.addSeparator();
+        menu.addItem(200, "Preferences...");
+#endif
+        return menu;
+    }
 
-    addUjam("VD-BRUTE",   "Virtual Drummer Brute");
-    addUjam("VD-DEEP",    "Virtual Drummer Deep");
-    addUjam("VD-HEAVY",   "Virtual Drummer Heavy");
-    addUjam("VD-HOT",     "Virtual Drummer Hot");
-    addUjam("VD-LEGEND",  "Virtual Drummer Legend");
-    addUjam("VD-SOLID",   "Virtual Drummer Solid");
-    addUjam("BM-CIRCUITS","Beatmaker Circuits");
+    if (topLevelIndex == 1)
+    {
+        const int mode = soundMode.load();
+        menu.addItem(210, "Internal", true, mode == 1);
+        menu.addItem(211, "UJAM / VST", true, mode == 2);
+        menu.addItem(212, "Both", true, mode == 3);
+        menu.addSeparator();
 
-    if (files.isEmpty())
-        menu.addItem(999, "(No UJAM plugins found)", false, false);
-
-    menu.addSeparator();
-    menu.addItem(1000, "Browse for plugin...");
-
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&loadPluginButton),
-        [this, files](int result)
+        juce::PopupMenu plugins;
+        ujamPluginFiles.clear();
+        const auto vst3Dir = juce::File("/Library/Audio/Plug-Ins/VST3");
+        const auto auDir = juce::File("/Library/Audio/Plug-Ins/Components");
+        auto addUjam = [&](const juce::String& stem, const juce::String& label)
         {
-            if (result == 1000)
-            {
-                browseForPlugin();
+            const auto vst3 = vst3Dir.getChildFile(stem + ".vst3");
+            const auto au = auDir.getChildFile(stem + ".component");
+            const auto file = vst3.exists() ? vst3 : au;
+            if (! file.exists())
                 return;
-            }
-            if (result >= 1 && result <= files.size())
-                loadPluginFromFile(files[result - 1]);
-        });
+            ujamPluginFiles.add(file);
+            const bool current = pluginHost.isLoaded() && pluginHost.getFile() == file;
+            plugins.addItem(ujamPluginFiles.size(), label, true, current);
+        };
+        addUjam("VD-BRUTE",    "Virtual Drummer Brute");
+        addUjam("VD-DEEP",     "Virtual Drummer Deep");
+        addUjam("VD-HEAVY",    "Virtual Drummer Heavy");
+        addUjam("VD-HOT",      "Virtual Drummer Hot");
+        addUjam("VD-LEGEND",   "Virtual Drummer Legend");
+        addUjam("VD-SOLID",    "Virtual Drummer Solid");
+        addUjam("BM-CIRCUITS", "Beatmaker Circuits");
+        if (ujamPluginFiles.isEmpty())
+            plugins.addItem(999, "(No UJAM plugins found)", false, false);
+        plugins.addSeparator();
+        plugins.addItem(1000, "Browse for plugin...");
+        menu.addSubMenu("Load UJAM / VST", plugins);
+
+        const bool loaded = pluginHost.isLoaded();
+        menu.addItem(220, loaded ? ("Show " + pluginHost.getName() + " UI") : "Show Plugin UI",
+                     loaded, pluginHost.isEditorOpen());
+        return menu;
+    }
+
+    refreshMidiOutputs();
+    menu.addItem(300, "Off", true, midiOutIndex < 0);
+    for (int i = 0; i < midiDevices.size(); ++i)
+        menu.addItem(301 + i, midiDevices[i].name, true, midiOutIndex == i);
+    return menu;
+}
+
+void MainComponent::menuItemSelected(int menuItemID, int)
+{
+    if (menuItemID == 200) { showPreferences(); return; }
+    if (menuItemID == 210) { setSoundMode(1); return; }
+    if (menuItemID == 211)
+    {
+        setSoundMode(2);
+        if (! pluginHost.isLoaded())
+            evolutionStatus.setText("Sound · Load UJAM / VST to host Hot",
+                                    juce::dontSendNotification);
+        return;
+    }
+    if (menuItemID == 212) { setSoundMode(3); return; }
+    if (menuItemID == 220)
+    {
+        if (pluginHost.isLoaded())
+            pluginHost.showEditor();
+        return;
+    }
+    if (menuItemID == 230) { newGroove(); return; }
+    if (menuItemID == 231) { showLoadMenu(); return; }
+    if (menuItemID == 232) { saveCurrentGroove(); return; }
+    if (menuItemID == 233) { saveGrooveAs(); return; }
+    if (menuItemID == 300) { setMidiOutput(-1); return; }
+    if (menuItemID >= 301 && menuItemID - 301 < midiDevices.size())
+    {
+        setMidiOutput(menuItemID - 301);
+        return;
+    }
+    if (menuItemID == 1000) { browseForPlugin(); return; }
+    if (menuItemID >= 1 && menuItemID <= ujamPluginFiles.size())
+        loadPluginFromFile(ujamPluginFiles[menuItemID - 1]);
 }
 
 void MainComponent::tryLoadUjamHot()
@@ -416,7 +516,7 @@ void MainComponent::tryLoadUjamHot()
     const auto file = vst3.exists() ? vst3 : au;
     if (! file.exists())
     {
-        evolutionStatus.setText("UJAM Hot not found — click LOAD VST", juce::dontSendNotification);
+        evolutionStatus.setText("UJAM Hot not found — Sound menu · Load UJAM / VST", juce::dontSendNotification);
         return;
     }
     if (pluginHost.isLoaded() && pluginHost.getFile() == file)
@@ -425,10 +525,7 @@ void MainComponent::tryLoadUjamHot()
     juce::String error;
     if (pluginHost.loadFromFile(file, error))
     {
-        soundSource.setSelectedId(2, juce::dontSendNotification);
-        soundMode.store(2);
-        engine.setInternalSynthEnabled(false);
-        engine.state().soundMode = 2;
+        setSoundMode(2);
         engine.state().lastPluginPath = file.getFullPathName();
         engine.saveAutosave();
         pluginHost.prepare(deviceManager.getCurrentAudioDevice() != nullptr
@@ -439,6 +536,8 @@ void MainComponent::tryLoadUjamHot()
                                : 512);
         evolutionStatus.setText("UJAM · Virtual Drummer Hot", juce::dontSendNotification);
         pluginHost.showEditor();
+        applyStoredPluginKit();
+        refreshVstKitUi(true);
     }
     else
     {
@@ -471,10 +570,7 @@ void MainComponent::loadPluginFromFile(const juce::File& file)
     juce::String error;
     if (pluginHost.loadFromFile(file, error))
     {
-        soundSource.setSelectedId(2, juce::dontSendNotification);
-        soundMode.store(2);
-        engine.setInternalSynthEnabled(false);
-        engine.state().soundMode = 2;
+        setSoundMode(2);
         engine.state().lastPluginPath = file.getFullPathName();
         engine.saveAutosave();
         pluginHost.prepare(deviceManager.getCurrentAudioDevice() != nullptr
@@ -485,14 +581,14 @@ void MainComponent::loadPluginFromFile(const juce::File& file)
                                : 512);
         evolutionStatus.setText("PLUGIN · " + pluginHost.getName(), juce::dontSendNotification);
         pluginHost.showEditor();
+        refreshVstKitUi(true);
     }
     else
     {
-        soundSource.setSelectedId(1, juce::dontSendNotification);
-        soundMode.store(1);
-        engine.setInternalSynthEnabled(true);
+        setSoundMode(1);
         evolutionStatus.setText("Plugin load failed: " + error + " — using INTERNAL",
                                 juce::dontSendNotification);
+        refreshVstKitUi(true);
     }
 }
 
@@ -500,10 +596,12 @@ void MainComponent::captureSessionIntoState()
 {
     engine.state().name = projectName.getText().trim();
     if (engine.state().name.isEmpty())
-        engine.state().name = "the lil' God Projector";
+        engine.state().name = "Lil God Projector";
     engine.state().soundMode = soundMode.load();
     if (pluginHost.isLoaded())
         engine.state().lastPluginPath = pluginHost.getFile().getFullPathName();
+    engine.state().lastPluginProgram = pluginHost.getKitIndex();
+    engine.state().lastPluginPatch = pluginHost.getCurrentPatchName();
 }
 
 void MainComponent::applyLoadedSession()
@@ -511,9 +609,7 @@ void MainComponent::applyLoadedSession()
     const auto& st = engine.state();
     projectName.setText(st.name, false);
     const int mode = juce::jlimit(1, 3, st.soundMode);
-    soundMode.store(mode);
-    soundSource.setSelectedId(mode, juce::dontSendNotification);
-    engine.setInternalSynthEnabled(mode != 2);
+    setSoundMode(mode);
 
     const auto pluginFile = juce::File(st.lastPluginPath);
     const bool alreadyLoaded = pluginHost.isLoaded()
@@ -528,9 +624,7 @@ void MainComponent::applyLoadedSession()
             juce::String error;
             if (pluginHost.loadFromFile(pluginFile, error))
             {
-                soundSource.setSelectedId(2, juce::dontSendNotification);
-                soundMode.store(2);
-                engine.setInternalSynthEnabled(false);
+                setSoundMode(2);
                 pluginHost.prepare(deviceManager.getCurrentAudioDevice() != nullptr
                                        ? deviceManager.getCurrentAudioDevice()->getCurrentSampleRate()
                                        : 44100.0,
@@ -539,7 +633,9 @@ void MainComponent::applyLoadedSession()
                                        : 512);
                 evolutionStatus.setText("LOADED · " + st.name + " · " + pluginHost.getName(),
                                         juce::dontSendNotification);
-                pluginHost.showEditor();
+        pluginHost.showEditor();
+        applyStoredPluginKit();
+        refreshVstKitUi(true);
             }
             else
             {
@@ -555,6 +651,8 @@ void MainComponent::applyLoadedSession()
     {
         evolutionStatus.setText("LOADED · " + st.name + " · " + pluginHost.getName(),
                                 juce::dontSendNotification);
+        applyStoredPluginKit();
+        refreshVstKitUi(true);
     }
 
     torsoPage.refreshFromEngine();
@@ -563,13 +661,13 @@ void MainComponent::applyLoadedSession()
 
     if (soundMode.load() >= 2 && ! pluginHost.isLoaded())
     {
-        soundSource.setSelectedId(1, juce::dontSendNotification);
-        soundMode.store(1);
-        engine.setInternalSynthEnabled(true);
-        engine.state().soundMode = 1;
-        evolutionStatus.setText("UJAM not loaded — using INTERNAL. Click LOAD VST to host Hot.",
+        setSoundMode(1);
+        evolutionStatus.setText("UJAM not loaded — using INTERNAL. Sound menu · Load UJAM / VST to host Hot.",
                                 juce::dontSendNotification);
     }
+
+    if (pluginHost.isLoaded())
+        refreshVstKitUi(vstKitListCount < 0);
 
     repaint();
 }
@@ -594,7 +692,7 @@ void MainComponent::saveGrooveAs()
     captureSessionIntoState();
     auto current = engine.state().name.trim();
     if (current.isEmpty())
-        current = "the lil' God Projector";
+        current = "Lil God Projector";
     const auto suggested = current.endsWithIgnoreCase(" copy") ? current : current + " copy";
 
     auto* w = new juce::AlertWindow("Save As",
@@ -609,7 +707,7 @@ void MainComponent::saveGrooveAs()
             return;
         auto name = w->getTextEditorContents("name").trim();
         if (name.isEmpty())
-            name = "the lil' God Projector";
+            name = "Lil God Projector";
         juce::String error;
         if (engine.saveStoredGroove(name, error))
         {
@@ -722,12 +820,23 @@ void MainComponent::showLoadMenu()
 
 void MainComponent::refreshMidiOutputs()
 {
-    midiOutBox.clear();
+    const auto previousId = (midiOutIndex >= 0 && midiOutIndex < midiDevices.size())
+        ? midiDevices[midiOutIndex].identifier : juce::String();
     midiDevices = juce::MidiOutput::getAvailableDevices();
-    midiOutBox.addItem("MIDI OUT: Off", 1);
-    for (int i = 0; i < midiDevices.size(); ++i)
-        midiOutBox.addItem(midiDevices[i].name, i + 2);
-    midiOutBox.setSelectedId(1, juce::dontSendNotification);
+    midiOutIndex = -1;
+    if (previousId.isNotEmpty())
+    {
+        for (int i = 0; i < midiDevices.size(); ++i)
+        {
+            if (midiDevices[i].identifier == previousId)
+            {
+                midiOutIndex = i;
+                break;
+            }
+        }
+        if (midiOutIndex < 0)
+            midiOutput.reset();
+    }
 }
 
 void MainComponent::addSmallLabel(juce::Label& l, const juce::String& text)
@@ -991,7 +1100,7 @@ void MainComponent::paint(juce::Graphics& g)
                                                     BinaryData::GrooveLabIcon_pngSize);
         g.drawImageWithin(icon, 12, 12, 48, 48, juce::RectanglePlacement::centred);
     }
-    g.setColour(juce::Colour(0xffe6f0f5));g.setFont(juce::FontOptions(16.0f,juce::Font::bold));g.drawText("the lil' God Projector",66,16,236,34,juce::Justification::centredLeft);
+    g.setColour(juce::Colour(0xffe6f0f5));g.setFont(juce::FontOptions(16.0f,juce::Font::bold));g.drawText("Lil God Projector",66,16,236,34,juce::Justification::centredLeft);
 
     if (currentPage == 0)
     {
@@ -1044,10 +1153,8 @@ void MainComponent::resized()
     x += 28 + 2;
     int bpmW = 118;
 
-    int midiW = 120, srcW = 100;
-    const int pageW = 50 + hg + 50 + hg + 88 + hg + 50;
-    int toolsW = srcW + hg + 72 + hg + 52 + hg + midiW;
-    int rightNeed = pageW + hg + toolsW;
+    const int pageW = 50 + hg + 88 + hg + 50;
+    int rightNeed = pageW;
     int meterW = 58;
     int leftEnd = x + bpmW + 4 + 40 + 4 + meterW;
     int startPages = getWidth() - 12 - rightNeed;
@@ -1069,14 +1176,9 @@ void MainComponent::resized()
         c.setBounds(px, hy, w, hh);
         px += w + hg;
     };
-    place(prefsButton, 50);
     place(pageGridButton, 50);
     place(pageT1Button, 88);
     place(pageSongButton, 50);
-    place(soundSource, srcW);
-    place(loadPluginButton, 72);
-    place(showPluginButton, 52);
-    place(midiOutBox, midiW);
 
     torsoPage.setBounds(getLocalBounds().withTrimmedTop(72).withTrimmedBottom(34));
     songPage.setBounds(getLocalBounds().withTrimmedTop(72).withTrimmedBottom(34));
@@ -1096,7 +1198,18 @@ void MainComponent::resized()
 
     auto sf=sequencerPanel.reduced(12).removeFromBottom(36);velocity.setBounds(sf.removeFromLeft(78));sf.removeFromLeft(4);midiNote.setBounds(sf.removeFromLeft(78));sf.removeFromLeft(4);probability.setBounds(sf.removeFromLeft(82));sf.removeFromLeft(8);ratchet.setBounds(sf.removeFromLeft(68));sf.removeFromLeft(8);role.setBounds(sf.removeFromLeft(94));
 
-    auto sp=soundPanel.reduced(12);sp.removeFromTop(45);int colW=juce::jmax(58,sp.getWidth()/groove::paramCount);for(int i=0;i<groove::paramCount;++i){auto col=juce::Rectangle<int>(sp.getX()+i*colW,sp.getY(),colW,sp.getHeight());soundLabels[(size_t)i].setBounds(col.getX(),sp.getY(),colW,18);soundSliders[(size_t)i].setBounds(col.getX(),sp.getY()+22,colW,108);}
+    auto sp=soundPanel.reduced(8, 4);
+    auto kitHeader=sp.removeFromTop(32);
+    kitHeader.removeFromLeft(78); // room for painted SOUND title
+    vstKitNext.setBounds(kitHeader.removeFromRight(34).reduced(2, 2));
+    vstKitPrev.setBounds(kitHeader.removeFromRight(34).reduced(2, 2));
+    kitHeader.removeFromRight(4);
+    vstKitBox.setBounds(kitHeader.reduced(2, 2));
+    vstKitBox.toFront(false);
+    vstKitPrev.toFront(false);
+    vstKitNext.toFront(false);
+    sp.removeFromTop(6);
+    int colW=juce::jmax(58,sp.getWidth()/groove::paramCount);for(int i=0;i<groove::paramCount;++i){auto col=juce::Rectangle<int>(sp.getX()+i*colW,sp.getY(),colW,juce::jmin(130,sp.getHeight()));soundLabels[(size_t)i].setBounds(col.getX(),col.getY(),colW,18);soundSliders[(size_t)i].setBounds(col.getX(),col.getY()+18,colW,108);}
 
     auto ep=evolutionPanel.reduced(14);ep.removeFromTop(46); auto a=ep.removeFromTop(31);similarity.setBounds(a.withTrimmedLeft(95));auto b=ep.removeFromTop(35);surprise.setBounds(b.withTrimmedLeft(95).removeFromLeft(70));auto c=ep.removeFromTop(35);lockResistance.setBounds(c.withTrimmedLeft(95));auto d=ep.removeFromTop(35);evolveAmount.setBounds(d.withTrimmedLeft(95));auto buttons=ep.removeFromBottom(70);int bw=juce::jmax(58,buttons.getWidth()/5);sparse.setBounds(buttons.removeFromLeft(bw).reduced(2));syncopate.setBounds(buttons.removeFromLeft(bw).reduced(2));human.setBounds(buttons.removeFromLeft(bw).reduced(2));dense.setBounds(buttons.removeFromLeft(bw).reduced(2));soundEvolve.setBounds(buttons.removeFromLeft(bw).reduced(2));evolutionStatus.setBounds(evolutionPanel.getX()+14,evolutionPanel.getBottom()-30,evolutionPanel.getWidth()-28,20);
 
@@ -1169,6 +1282,8 @@ void MainComponent::timerCallback()
 {
     playButton.setButtonText(engine.isPlaying()?"STOP":"PLAY");
     meterBox.setSelectedId((int) engine.state().meter + 1, juce::dontSendNotification);
+    if (pluginHost.isLoaded() && ! vstKitBox.isPopupActive())
+        refreshVstKitUi(false);
     if (currentPage == 0)
         repaint();
 }
@@ -1199,12 +1314,64 @@ void MainComponent::setLabPageVisible(bool on)
             &soundScope, &soundScopeLabel, &velocity, &midiNote, &probability, &ratchet, &role,
             &trackSteps, &trackPulses, &trackRotate, &trackDivision, &trackProbability, &trackVelocity,
             &evolvePolicy, &policyLabel, &trackProbLabel, &trackVelLabel, &evolveAmount, &similarity, &lockResistance, &surprise,
-            &selectedLabel, &evolutionStatus})
+            &selectedLabel, &evolutionStatus, &vstKitBox, &vstKitPrev, &vstKitNext})
         c->setVisible(on);
 
     for (int i = 0; i < groove::paramCount; ++i)
     {
         soundSliders[(size_t)i].setVisible(on);
         soundLabels[(size_t)i].setVisible(on);
+    }
+}
+
+void MainComponent::applyStoredPluginKit()
+{
+    if (! pluginHost.isLoaded())
+        return;
+    const auto& patch = engine.state().lastPluginPatch;
+    if (patch.isNotEmpty() && pluginHost.setKitByName(patch))
+        return;
+}
+
+void MainComponent::refreshVstKitUi(bool rebuildList)
+{
+    const bool loaded = pluginHost.isLoaded();
+    vstKitBox.setEnabled(loaded);
+    vstKitPrev.setEnabled(loaded);
+    vstKitNext.setEnabled(loaded);
+
+    if (! loaded)
+    {
+        if (rebuildList || vstKitListCount != 0)
+        {
+            const juce::ScopedValueSetter<bool> sv(refreshing, true);
+            vstKitBox.clear(juce::dontSendNotification);
+            vstKitBox.addItem("Load VST to browse sounds", 1);
+            vstKitBox.setSelectedId(1, juce::dontSendNotification);
+            vstKitListCount = 0;
+        }
+        return;
+    }
+
+    const int n = pluginHost.getKitCount();
+    if (rebuildList || n != vstKitListCount)
+    {
+        const juce::ScopedValueSetter<bool> sv(refreshing, true);
+        vstKitBox.clear(juce::dontSendNotification);
+        for (int i = 0; i < n; ++i)
+        {
+            auto name = pluginHost.getKitName(i);
+            if (name.isEmpty())
+                name = juce::String(i + 1).paddedLeft('0', 2);
+            vstKitBox.addItem(name, i + 1);
+        }
+        vstKitListCount = n;
+    }
+
+    const int cur = juce::jlimit(0, juce::jmax(0, n - 1), pluginHost.getKitIndex());
+    if (vstKitBox.getSelectedId() != cur + 1)
+    {
+        const juce::ScopedValueSetter<bool> sv(refreshing, true);
+        vstKitBox.setSelectedId(cur + 1, juce::dontSendNotification);
     }
 }

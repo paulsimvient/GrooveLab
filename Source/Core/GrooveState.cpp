@@ -155,6 +155,8 @@ juce::var GrooveState::toVar() const
     root->setProperty("formatVersion", 9);
     root->setProperty("name", name);
     root->setProperty("lastPluginPath", lastPluginPath);
+    root->setProperty("lastPluginProgram", lastPluginProgram);
+    root->setProperty("lastPluginPatch", lastPluginPatch);
     root->setProperty("soundMode", soundMode);
     root->setProperty("bpm", bpm);
     root->setProperty("meter", (int) meter);
@@ -268,6 +270,10 @@ bool GrooveState::fromVar(const juce::var& v)
         name = nameVar.toString();
     auto pluginVar = root->getProperty("lastPluginPath");
     if (!pluginVar.isVoid()) lastPluginPath = pluginVar.toString();
+    auto programVar = root->getProperty("lastPluginProgram");
+    if (!programVar.isVoid()) lastPluginProgram = (int) programVar;
+    auto patchVar = root->getProperty("lastPluginPatch");
+    if (!patchVar.isVoid()) lastPluginPatch = patchVar.toString();
     auto modeVar = root->getProperty("soundMode");
     if (!modeVar.isVoid()) soundMode = juce::jlimit(1, 3, (int) modeVar);
     selectedTrack = juce::jlimit(0, kTracks - 1, (int)root->getProperty("selectedTrack"));

@@ -10,8 +10,10 @@ public:
 
     std::array<Track, kTracks> tracks {};
     Song song;
-    juce::String name { "the lil' God Projector" };
+    juce::String name { "Lil God Projector" };
     juce::String lastPluginPath;
+    int lastPluginProgram = -1;
+    juce::String lastPluginPatch;
     int soundMode = 2;
     double bpm = 124.0;
     Meter meter = Meter::fourFour;

@@ -8,6 +8,7 @@
 #include "SongPage.h"
 
 class MainComponent : public juce::AudioAppComponent,
+                      public juce::MenuBarModel,
                       public juce::FileDragAndDropTarget,
                       private juce::Timer,
                       private juce::KeyListener,
@@ -44,11 +45,15 @@ private:
     void toggleTransport();
     void setPage(int page); // 0 GRID, 1 EUCLIDEAN, 2 SONG
     void setLabPageVisible(bool on);
-    void choosePluginFile();
+    juce::StringArray getMenuBarNames() override;
+    juce::PopupMenu getMenuForIndex(int topLevelIndex, const juce::String& menuName) override;
+    void menuItemSelected(int menuItemID, int topLevelMenuIndex) override;
     void browseForPlugin();
     void loadPluginFromFile(const juce::File&);
     void tryLoadUjamHot();
     void refreshMidiOutputs();
+    void setSoundMode(int mode);
+    void setMidiOutput(int deviceIndex);
     void showPreferences();
     void saveAudioSettings();
     static juce::File audioSettingsFile();
@@ -62,12 +67,16 @@ private:
     void showLoadMenu();
     void loadGrooveFromFile(const juce::File&);
     void newGroove();
+    void refreshVstKitUi(bool rebuildList);
+    void applyStoredPluginKit();
 
     groove::GrooveEngine engine;
     groove::ExternalPluginHost pluginHost;
     std::unique_ptr<juce::MidiOutput> midiOutput;
     std::unique_ptr<juce::FileChooser> fileChooser;
     juce::Array<juce::MidiDeviceInfo> midiDevices;
+    juce::Array<juce::File> ujamPluginFiles;
+    juce::PopupMenu extraAppleMenu;
     std::atomic<int> soundMode { 2 };
     GrooveLookAndFeel look;
     TorsoPage torsoPage { engine };
@@ -83,14 +92,10 @@ private:
     juce::TextButton pageGridButton { "GRID" };
     juce::TextButton pageT1Button { "EUCLIDEAN" };
     juce::TextButton pageSongButton { "SONG" };
-    juce::TextButton prefsButton { "PREFS" };
     juce::TextButton saveButton { "SAVE" };
     juce::TextButton saveAsButton { "SAVE AS" };
     juce::TextButton loadButton { "LOAD" };
-    juce::ComboBox soundSource;
-    juce::TextButton loadPluginButton { "LOAD VST" };
-    juce::TextButton showPluginButton { "UJAM UI" };
-    juce::ComboBox midiOutBox;
+    int midiOutIndex = -1;
     juce::Slider bpm;
     juce::Label bpmLabel;
     juce::ComboBox meterBox;
@@ -99,6 +104,10 @@ private:
 
     std::array<juce::Slider, groove::paramCount> soundSliders;
     std::array<juce::Label, groove::paramCount> soundLabels;
+    juce::ComboBox vstKitBox;
+    juce::TextButton vstKitPrev { "◀" };
+    juce::TextButton vstKitNext { "▶" };
+    int vstKitListCount = -1;
     // Explicit sound edit scope. STEP is the default: knob movement writes
     // per-step parameter locks. VOICE edits the selected track's base sound.
     juce::ComboBox soundScope;

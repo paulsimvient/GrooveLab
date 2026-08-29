@@ -32,8 +32,8 @@ set(GROOVELAB_CORE
 )
 
 juce_add_gui_app(GrooveLab
-    PRODUCT_NAME "Groove Lab"
-    COMPANY_NAME "Groove Lab"
+    PRODUCT_NAME "Lil God Projector"
+    COMPANY_NAME "Lil God Projector"
     BUNDLE_ID "com.groovelab.app"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Resources/GrooveLabIcon.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/Resources/GrooveLabIcon.png"
@@ -72,12 +72,12 @@ target_link_libraries(GrooveLab PRIVATE
 )
 
 juce_add_plugin(GrooveLabPlugin
-    COMPANY_NAME "Groove Lab"
+    COMPANY_NAME "Lil God Projector"
     BUNDLE_ID "com.groovelab.plugin"
     PLUGIN_MANUFACTURER_CODE GrLb
     PLUGIN_CODE Gr01
     FORMATS AU VST3
-    PRODUCT_NAME "Groove Lab"
+    PRODUCT_NAME "Lil God Projector"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Resources/GrooveLabIcon.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/Resources/GrooveLabIcon.png"
     IS_SYNTH TRUE
