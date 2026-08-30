@@ -113,8 +113,34 @@ struct Track
     float evolveAmount = 0.5f;
     bool muted = false;
     bool soloed = false;
-    int midiNote = 36; // assigned UJAM kit key (C1–D#2)
+    int midiNote = 36; // C1 default; full MIDI 0–127 is legal
 };
+
+enum class MeterTransform : int { reflow = 0, crop, squeeze };
+
+inline constexpr int kMeterTransformCount = 3;
+
+inline const char* meterTransformName(MeterTransform transform)
+{
+    switch (transform)
+    {
+        case MeterTransform::crop:    return "CROP";
+        case MeterTransform::reflow:  return "REFLOW";
+        case MeterTransform::squeeze: return "SQUEEZE";
+        default:                      return "REFLOW";
+    }
+}
+
+inline const char* meterTransformHint(MeterTransform transform)
+{
+    switch (transform)
+    {
+        case MeterTransform::crop:    return "Drop extra beats in each bar";
+        case MeterTransform::reflow:  return "Keep the groove, move the bar lines";
+        case MeterTransform::squeeze: return "Fit the old bar into the new bar";
+        default:                      return "";
+    }
+}
 
 enum class Meter : int
 {
@@ -160,6 +186,18 @@ inline int meterStepsPerBar(Meter meter)
         case Meter::twelveEight: return 24;
         default:                 return 16;
     }
+}
+
+inline int fitStepsToMeter(int currentSteps, Meter fromMeter, Meter toMeter)
+{
+    juce::ignoreUnused(fromMeter);
+    const int newSpb = juce::jmax(1, meterStepsPerBar(toMeter));
+    currentSteps = juce::jmax(1, currentSteps);
+    // Already a whole number of bars in the new meter (12, 24, …) — leave it.
+    if (currentSteps % newSpb == 0)
+        return juce::jlimit(1, kSteps, currentSteps);
+    // Otherwise snap to one bar so 4/4 16 → 3/4 12, never 24.
+    return juce::jlimit(1, kSteps, newSpb);
 }
 
 inline double meterQuarterNotesPerBar(Meter meter)
@@ -223,17 +261,157 @@ struct TrackShape
     }
 };
 
+inline constexpr int kMidiLanes = 4;
+
+struct MidiLaneNote
+{
+    int step = 0;
+    int note = 60;
+    float velocity = 1.0f;
+    int lengthSteps = 1;
+};
+
+struct MidiLanePatch
+{
+    int step = 0;
+    juce::String name;
+    int kitIndex = 0;
+};
+
+struct MidiLaneCc
+{
+    int step = 0;
+    int number = 1;
+    int value = 0;
+};
+
+struct MidiLaneExtra
+{
+    int step = 0;
+    int type = 0; // 1 pitch, 2 pressure, 3 poly aftertouch, 4 program
+    int data1 = 0;
+    int data2 = 0;
+};
+
+struct MidiLane
+{
+    int channel = 1;
+    juce::String name;
+    std::vector<MidiLaneNote> notes;
+    std::vector<MidiLanePatch> patches;
+    std::vector<MidiLaneCc> ccs;
+    std::vector<MidiLaneExtra> extras;
+};
+
+inline const char* midiLaneName(int lane)
+{
+    static constexpr const char* names[] = { "DRUMS", "MOOG", "PROPHET", "KEYS" };
+    return names[juce::jlimit(0, kMidiLanes - 1, lane)];
+}
+
+inline int midiLaneChannel(int lane)
+{
+    static constexpr int ch[] = { 1, 2, 3, 4 };
+    return ch[juce::jlimit(0, kMidiLanes - 1, lane)];
+}
+
+inline int midiLaneIndexForChannel(int channel)
+{
+    switch (channel)
+    {
+        case 1: return 0;
+        case 2: return 1;
+        case 3: return 2;
+        case 4: return 3;
+        default: return -1;
+    }
+}
+
+inline std::array<MidiLane, kMidiLanes> makeDefaultMidiLanes()
+{
+    std::array<MidiLane, kMidiLanes> lanes {};
+    for (int i = 0; i < kMidiLanes; ++i)
+    {
+        lanes[(size_t) i].channel = midiLaneChannel(i);
+        lanes[(size_t) i].name = midiLaneName(i);
+    }
+    return lanes;
+}
+
+struct PatternTake
+{
+    juce::String label;
+    std::array<TrackShape, kTracks> shapes {};
+    std::array<std::array<Step, kSteps>, kTracks> steps {};
+    std::array<MidiLane, kMidiLanes> midiLanes = makeDefaultMidiLanes();
+};
+
 struct SongSection
 {
     SongPart part = SongPart::verse;
     Meter meter = Meter::fourFour;
     int bars = 4;
     std::array<TrackShape, kTracks> shapes {};
+    std::array<std::array<Step, kSteps>, kTracks> steps {};
+    std::array<MidiLane, kMidiLanes> midiLanes = makeDefaultMidiLanes();
+    std::vector<PatternTake> takes;
+    int currentTake = -1;
 };
+
+inline void copyPatternFromTracks(SongSection& section, const std::array<Track, kTracks>& tracks)
+{
+    for (int t = 0; t < kTracks; ++t)
+    {
+        section.shapes[(size_t) t] = TrackShape::fromTrack(tracks[t]);
+        section.steps[(size_t) t] = tracks[t].steps;
+    }
+}
+
+inline void applyPatternToTracks(const SongSection& section, std::array<Track, kTracks>& tracks)
+{
+    for (int t = 0; t < kTracks; ++t)
+    {
+        auto& tr = tracks[t];
+        const auto& sh = section.shapes[(size_t) t];
+        tr.generatorSteps = juce::jlimit(1, kSteps, sh.generatorSteps);
+        tr.pulses = juce::jlimit(0, tr.generatorSteps, sh.pulses);
+        tr.rotate = sh.rotate;
+        tr.division = sh.division;
+        tr.probability = juce::jlimit(0.0f, 1.0f, sh.probability);
+        tr.velocity = juce::jlimit(0.0f, 1.2f, sh.velocity);
+        tr.steps = section.steps[(size_t) t];
+    }
+}
+
+inline constexpr int kEqBands = 7;
+inline constexpr float kEqFreqs[kEqBands] = { 80.0f, 200.0f, 500.0f, 1000.0f, 2500.0f, 6000.0f, 12000.0f };
+inline constexpr const char* kEqLabels[kEqBands] = { "80", "200", "500", "1k", "2k5", "6k", "12k" };
+
+struct MixSettings
+{
+    float drumVol = 1.0f;
+    float drumLeft = 1.0f;
+    float drumRight = 1.0f;
+    float synthVol = 1.0f;
+    float synthLeft = 1.0f;
+    float synthRight = 1.0f;
+    float keysVol = 1.0f;
+    float keysLeft = 1.0f;
+    float keysRight = 1.0f;
+    float polyVol = 1.0f;
+    float polyLeft = 1.0f;
+    float polyRight = 1.0f;
+    float busComp = 0.22f;
+    float busDelay = 0.0f;
+    float masterVol = 1.0f;
+    std::array<float, kEqBands> eqGainDb {};
+};
+
+inline constexpr int kMaxTakes = 12;
 
 struct Song
 {
-    bool follow = true;
+    bool follow = false;
     int current = 0;
     std::vector<SongSection> sections;
 };

@@ -7,8 +7,8 @@ namespace groove
 class ExternalPluginHost::EditorWindow : public juce::DocumentWindow
 {
 public:
-    EditorWindow(juce::AudioProcessor& proc)
-        : DocumentWindow(proc.getName(),
+    EditorWindow(juce::AudioProcessor& proc, const juce::String& title, juce::Point<int> pos)
+        : DocumentWindow(title.isNotEmpty() ? title : proc.getName(),
                          juce::Colour(0xff0a151e),
                          DocumentWindow::closeButton | DocumentWindow::minimiseButton)
     {
@@ -17,8 +17,13 @@ public:
         {
             setContentNonOwned(editor, true);
             setResizable(true, false);
-            centreWithSize(juce::jmax(400, editor->getWidth()),
-                           juce::jmax(300, editor->getHeight()));
+            const int w = juce::jmax(400, editor->getWidth());
+            const int h = juce::jmax(300, editor->getHeight());
+            setSize(w, h);
+            if (pos.x > 0 || pos.y > 0)
+                setTopLeftPosition(pos);
+            else
+                centreWithSize(w, h);
         }
         else
         {
@@ -307,6 +312,153 @@ bool paramMatchesKey(const juce::AudioProcessorParameter& p, const juce::String&
     return name.equalsIgnoreCase(key) || paramToken(name) == keyToken;
 }
 
+bool isHostedAutomationJunk(const juce::AudioProcessorParameter& p)
+{
+    const auto name = p.getName(64);
+    return name.startsWithIgnoreCase("MIDI CC")
+        || name.containsIgnoreCase("Bypass")
+        || name.equalsIgnoreCase("POWER");
+}
+
+juce::String uadWantedToken(const juce::String& key)
+{
+    const auto token = paramToken(key);
+    static const char* aliases[][2] = {
+        { "modamt", "modamount" },
+        { "osc1type", "osc1wave" },
+        { "osc2type", "osc2wave" },
+        { "osc3type", "osc3wave" },
+        { "extfbonoff", "inputsource" },
+        { "aenvattack", "ampenvattack" },
+        { "aenvdecay", "ampenvdecay" },
+        { "aenvsustain", "ampenvsustain" },
+        { "fenvattack", "filtenvattack" },
+        { "fenvdecay", "filtenvdecay" },
+        { "fenvsustain", "filtenvsustain" },
+        { "filtmod", "filtermod" },
+        { "filtkbd13", "filterkbd13" },
+        { "filtkbd23", "filterkbd23" },
+        { "filtcutoff", "filtercutoff" },
+        { "filtres", "filterres" },
+        { "filtcontamt", "filtercontour" },
+        { "modmix", "modulationmix" },
+        { "monopriority", "notepriority" },
+        { "trigmode", "triggermode" },
+        { "pbrange", "pbendrange" },
+        { "modsrc1", "modsourcea" },
+        { "modsrc2", "modsourceb" },
+        { "lfosync", "temposync" },
+        { "lfofreq", "lforate" },
+        { "lfoshape", "lfowave" },
+        { "velcutoff", "veltofiltercut" },
+        { "velfenv", "veltofilterenv" },
+        { "velaenv", "veltoampenv" },
+    };
+    for (const auto& alias : aliases)
+        if (token == alias[0])
+            return alias[1];
+    return token;
+}
+
+juce::AudioProcessorParameter* findUadControl(juce::AudioPluginInstance& inst,
+                                              const juce::String& key)
+{
+    const auto want = uadWantedToken(key);
+    if (want.isEmpty())
+        return nullptr;
+
+    juce::AudioProcessorParameter* best = nullptr;
+    int bestScore = 0;
+    for (auto* p : inst.getParameters())
+    {
+        if (p == nullptr || isHostedAutomationJunk(*p))
+            continue;
+        const auto name = paramToken(p->getName(64));
+        int score = 0;
+        if (name == want)
+            score = 1000;
+        else if (name.startsWith(want))
+            score = 500 - (name.length() - want.length());
+        else if (want.startsWith(name) && name.length() >= 5)
+            score = 300;
+        if (score > bestScore)
+        {
+            bestScore = score;
+            best = p;
+        }
+    }
+    return bestScore >= 400 ? best : nullptr;
+}
+
+bool uadTextMatches(const juce::String& text, double real)
+{
+    const double parsed = text.getDoubleValue();
+    const double scale = juce::jmax(1.0, std::abs(real));
+    return std::abs(parsed - real) <= 0.02 * scale + 0.002;
+}
+
+bool uadTextLooksDefault(const juce::AudioProcessorParameter& p)
+{
+    const auto mid = p.getText(0.5f, 8).trim();
+    return mid == "0.50" || mid == "0.5";
+}
+
+float uadRealToNorm(juce::AudioProcessorParameter& p, const juce::var& real)
+{
+    if (real.isBool())
+        return (bool) real ? 1.0f : 0.0f;
+
+    const int steps = p.getNumSteps();
+    if (p.isDiscrete() && steps > 1 && steps < 64)
+    {
+        const int idx = juce::jlimit(0, steps - 1, (int) std::lround((double) real));
+        return (float) idx / (float) (steps - 1);
+    }
+
+    const double target = (double) real;
+    const juce::String candidates[] = {
+        real.toString(),
+        juce::String(target, 6),
+        juce::String(target, 3),
+    };
+    if (! uadTextLooksDefault(p))
+    {
+        for (const auto& text : candidates)
+        {
+            const float guess = p.getValueForText(text);
+            if (guess < 0.0f || guess > 1.0f)
+                continue;
+            if (uadTextMatches(p.getText(guess, 32), target))
+                return guess;
+        }
+
+        const double v0 = p.getText(0.0f, 32).getDoubleValue();
+        const double v1 = p.getText(1.0f, 32).getDoubleValue();
+        if (std::abs(v1 - v0) > 0.05)
+        {
+            const bool rising = v1 >= v0;
+            float lo = 0.0f, hi = 1.0f;
+            for (int i = 0; i < 28; ++i)
+            {
+                const float mid = 0.5f * (lo + hi);
+                const double vm = p.getText(mid, 32).getDoubleValue();
+                if ((rising && vm < target) || (! rising && vm > target))
+                    lo = mid;
+                else
+                    hi = mid;
+            }
+            return 0.5f * (lo + hi);
+        }
+    }
+
+    const double shown = p.getCurrentValueAsText().getDoubleValue();
+    const float current = p.getValue();
+    if (current > 0.001f && std::abs(shown / (double) current - 10.0) < 1.5)
+        return juce::jlimit(0.0f, 1.0f, (float) (target / 10.0));
+
+    return juce::jlimit(0.0f, 1.0f, (float) target);
+}
+
 juce::String compactStyle(const juce::String& s)
 {
     return s.toLowerCase().replace("bpm", {}).removeCharacters(" -_");
@@ -393,7 +545,84 @@ void ExternalPluginHost::scanUjamPatches()
         e.uniqueName = count <= 1;
     }
 
+    if (patches.empty())
+        scanUadPresets();
+
     guessCurrentPatchFromLiveState();
+}
+
+void ExternalPluginHost::scanUadPresets()
+{
+    patches.clear();
+    currentPatch = 0;
+    const auto stem = pluginFile.getFileNameWithoutExtension();
+    if (stem.isEmpty())
+        return;
+
+    juce::StringArray seenRoots;
+    juce::Array<juce::File> files;
+    const juce::File roots[] = {
+        juce::File("/Library/Application Support/Universal Audio/Plug-Ins")
+            .getChildFile(stem + ".lunacomponent")
+            .getChildFile("algo.bundle/Contents/Resources/presets"),
+        juce::File("/Library/Application Support/Universal Audio/Factory Presets")
+            .getChildFile(stem),
+        juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+            .getChildFile("Library/Application Support/Universal Audio/workspace/component_factory_presets")
+            .getChildFile(stem)
+    };
+
+    for (auto root : roots)
+    {
+        if (root.isSymbolicLink())
+            root = root.getLinkedTarget();
+        const auto key = root.getFullPathName();
+        if (key.isEmpty() || seenRoots.contains(key) || ! root.isDirectory())
+            continue;
+        seenRoots.add(key);
+        files.addArray(root.findChildFiles(juce::File::findFiles, true, "*.json"));
+    }
+
+    struct Order
+    {
+        static int compareElements(const juce::File& a, const juce::File& b)
+        {
+            return a.getFileNameWithoutExtension().compareNatural(b.getFileNameWithoutExtension());
+        }
+    };
+    Order order;
+    files.sort(order);
+
+    int defaultIndex = 0;
+    for (const auto& f : files)
+    {
+        const auto parsed = juce::JSON::parse(f);
+        auto* obj = parsed.getDynamicObject();
+        if (obj == nullptr)
+            continue;
+        const auto pluginId = obj->getProperty("plugin_id").toString();
+        if (obj->getProperty("chunk").getDynamicObject() == nullptr && pluginId.isEmpty())
+            continue;
+        if (pluginId.isNotEmpty() && pluginId != stem)
+            continue;
+
+        PatchEntry e;
+        e.file = f;
+        e.name = obj->getProperty("name").toString();
+        if (e.name.isEmpty())
+            e.name = f.getFileNameWithoutExtension().replaceCharacter('_', ' ');
+        if (auto* tags = obj->getProperty("tags").getArray(); tags != nullptr && ! tags->isEmpty())
+            e.category = tags->getFirst().toString();
+        if (e.category.isEmpty())
+            e.category = f.getParentDirectory().getFileName();
+        e.uniqueName = true;
+        if (e.name == "Default")
+            defaultIndex = (int) patches.size();
+        patches.push_back(std::move(e));
+    }
+
+    currentPatch = juce::jlimit(0, juce::jmax(0, (int) patches.size() - 1), defaultIndex);
+    lastMidiProgram.store(currentPatch);
 }
 
 void ExternalPluginHost::guessCurrentPatchFromLiveState()
@@ -432,6 +661,41 @@ void ExternalPluginHost::guessCurrentPatchFromLiveState()
     }
 }
 
+void ExternalPluginHost::applyUadPreset(const juce::File& file)
+{
+    const juce::ScopedLock sl(pluginLock);
+    auto* inst = plugin.get();
+    if (inst == nullptr || ! file.existsAsFile())
+        return;
+
+    const auto parsed = juce::JSON::parse(file);
+    auto* presetObj = parsed.getDynamicObject();
+    if (presetObj == nullptr)
+        return;
+
+    auto* chunk = presetObj->getProperty("chunk").getDynamicObject();
+    if (chunk == nullptr)
+        return;
+    auto* controls = chunk->getProperty("controls").getDynamicObject();
+    if (controls == nullptr)
+        return;
+
+    // Factory JSON is not the plugin's VC2! state. Push each control onto the
+    // hosted Mini-Moog parameters (the ~50 real knobs, not the MIDI CC list).
+    for (const auto& prop : controls->getProperties())
+    {
+        auto* ctrl = prop.value.getDynamicObject();
+        if (ctrl == nullptr || ! ctrl->hasProperty("real_value"))
+            continue;
+        auto* param = findUadControl(*inst, prop.name.toString());
+        if (param == nullptr)
+            continue;
+
+        const float norm = uadRealToNorm(*param, ctrl->getProperty("real_value"));
+        param->setValueNotifyingHost(norm);
+    }
+}
+
 void ExternalPluginHost::applyPatchFile(const juce::File& file)
 {
     juce::AudioPluginInstance* inst = nullptr;
@@ -446,6 +710,12 @@ void ExternalPluginHost::applyPatchFile(const juce::File& file)
     auto* obj = parsed.getDynamicObject();
     if (obj == nullptr)
         return;
+
+    if (obj->getProperty("chunk").getDynamicObject() != nullptr)
+    {
+        applyUadPreset(file);
+        return;
+    }
 
     const auto dsp = obj->getProperty("dsp_settings");
     auto* arr = dsp.getArray();
@@ -495,11 +765,11 @@ void ExternalPluginHost::applyPatchFile(const juce::File& file)
 
 int ExternalPluginHost::getKitCount() const
 {
+    if (! patches.empty())
+        return (int) patches.size();
     const juce::ScopedLock sl(pluginLock);
     if (plugin == nullptr)
         return 0;
-    if (! patches.empty())
-        return (int) patches.size();
     const int programs = plugin->getNumPrograms();
     if (programs > 1)
         return programs;
@@ -510,11 +780,11 @@ int ExternalPluginHost::getKitCount() const
 
 int ExternalPluginHost::getKitIndex() const
 {
+    if (! patches.empty())
+        return juce::jlimit(0, (int) patches.size() - 1, currentPatch);
     const juce::ScopedLock sl(pluginLock);
     if (plugin == nullptr)
         return 0;
-    if (! patches.empty())
-        return juce::jlimit(0, (int) patches.size() - 1, currentPatch);
     const int programs = plugin->getNumPrograms();
     if (programs > 1)
         return juce::jlimit(0, programs - 1, plugin->getCurrentProgram());
@@ -528,9 +798,6 @@ int ExternalPluginHost::getKitIndex() const
 
 juce::String ExternalPluginHost::getKitName(int index) const
 {
-    const juce::ScopedLock sl(pluginLock);
-    if (plugin == nullptr)
-        return {};
     if (! patches.empty())
     {
         const auto& e = patches[(size_t) juce::jlimit(0, (int) patches.size() - 1, index)];
@@ -538,6 +805,9 @@ juce::String ExternalPluginHost::getKitName(int index) const
             return e.name;
         return e.category + " · " + e.name;
     }
+    const juce::ScopedLock sl(pluginLock);
+    if (plugin == nullptr)
+        return {};
     const int programs = plugin->getNumPrograms();
     if (programs > 1)
     {
@@ -562,7 +832,6 @@ juce::String ExternalPluginHost::getKitName(int index) const
 
 juce::String ExternalPluginHost::getCurrentPatchName() const
 {
-    const juce::ScopedLock sl(pluginLock);
     if (patches.empty())
         return {};
     return patches[(size_t) juce::jlimit(0, (int) patches.size() - 1, currentPatch)].name;
@@ -636,7 +905,8 @@ bool ExternalPluginHost::setKitByName(const juce::String& name)
         return false;
     for (int i = 0; i < (int) patches.size(); ++i)
     {
-        if (patches[(size_t) i].name == name)
+        if (patches[(size_t) i].name == name
+            || getKitName(i) == name)
         {
             setKitIndex(i);
             return true;
@@ -651,15 +921,27 @@ void ExternalPluginHost::stepKit(int delta)
     setKitIndex((getKitIndex() + delta % n + n) % n);
 }
 
+void ExternalPluginHost::setEditorIdentity(const juce::String& title, juce::Point<int> screenPos)
+{
+    editorTitle = title;
+    editorPos = screenPos;
+    if (editorWindow != nullptr)
+        editorWindow->setName(title);
+}
+
+void ExternalPluginHost::setPluginMidiChannel(int channel)
+{
+    pluginMidiChannel.store(juce::jlimit(1, 16, channel));
+}
+
+bool ExternalPluginHost::isEditorOpen() const noexcept
+{
+    return editorWindow != nullptr && editorWindow->isVisible();
+}
+
 void ExternalPluginHost::showEditor()
 {
-    const auto gen = editorGeneration;
-    juce::Timer::callAfterDelay(50, [this, gen]
-    {
-        if (gen != editorGeneration)
-            return;
-        presentEditorNow();
-    });
+    presentEditorNow();
 }
 
 void ExternalPluginHost::presentEditorNow()
@@ -674,6 +956,12 @@ void ExternalPluginHost::presentEditorNow()
     if (inst == nullptr)
         return;
 
+    if (editorWindow != nullptr && editorWindow->getContentComponent() == nullptr)
+    {
+        editorWindow->detachEditor();
+        editorWindow.reset();
+    }
+
     if (editorWindow != nullptr)
     {
         editorWindow->setVisible(true);
@@ -681,7 +969,7 @@ void ExternalPluginHost::presentEditorNow()
         return;
     }
 
-    editorWindow = std::make_unique<EditorWindow>(*inst);
+    editorWindow = std::make_unique<EditorWindow>(*inst, editorTitle, editorPos);
 }
 
 void ExternalPluginHost::hideEditor()
@@ -743,10 +1031,20 @@ void ExternalPluginHost::process(juce::AudioBuffer<float>& io, juce::MidiBuffer&
     juce::AudioBuffer<float> block(pluginBuffer.getArrayOfWritePointers(),
                                    pluginBuffer.getNumChannels(), n);
     block.clear();
-    juce::MidiBuffer midiCopy(midi);
+    // Each host has its own buffer. UAD instruments listen on Omni / CH1,
+    // so stamp this instance's channel here — not the app's routing channel.
+    juce::MidiBuffer midiCopy;
+    const int listenCh = juce::jlimit(1, 16, pluginMidiChannel.load());
+    for (const auto metadata : midi)
+    {
+        auto msg = metadata.getMessage();
+        if (msg.getChannel() > 0)
+            msg.setChannel(listenCh);
+        midiCopy.addEvent(msg, metadata.samplePosition);
+    }
     const int pc = pendingProgramChange.exchange(-1);
     if (pc >= 0)
-        midiCopy.addEvent(juce::MidiMessage::programChange(1, juce::jlimit(0, 127, pc)), 0);
+        midiCopy.addEvent(juce::MidiMessage::programChange(listenCh, juce::jlimit(0, 127, pc)), 0);
     plugin->processBlock(block, midiCopy);
 
     if (replace)

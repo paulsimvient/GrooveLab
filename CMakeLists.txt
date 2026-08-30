@@ -43,11 +43,19 @@ target_sources(GrooveLab PRIVATE
     ${GROOVELAB_CORE}
     Source/Audio/ExternalPluginHost.h
     Source/Audio/ExternalPluginHost.cpp
+    Source/Audio/MixBus.h
+    Source/Audio/MixBus.cpp
     Source/UI/GrooveLookAndFeel.h
+    Source/UI/MixStrip.h
+    Source/UI/MixStrip.cpp
     Source/UI/TorsoPage.h
     Source/UI/TorsoPage.cpp
     Source/UI/SongPage.h
     Source/UI/SongPage.cpp
+    Source/UI/SynthKeyboard.h
+    Source/UI/SynthKeyboard.cpp
+    Source/UI/EvolutionLab.h
+    Source/UI/EvolutionLab.cpp
     Source/UI/MainComponent.h
     Source/UI/MainComponent.cpp
     Source/Standalone/Main.cpp

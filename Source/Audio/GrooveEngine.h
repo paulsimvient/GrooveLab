@@ -5,6 +5,7 @@
 #include "../Core/Ancestry.h"
 #include "../Sequencer/Sequencer.h"
 #include "DrumSynth.h"
+#include <array>
 #include <atomic>
 #include <vector>
 
@@ -17,6 +18,7 @@ public:
 
     void prepare(double sampleRate, int maxBlockSize);
     void process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiOut);
+    void takeLaneMidi(juce::MidiBuffer& dest);
     void setInternalSynthEnabled(bool shouldPlay);
     bool isInternalSynthEnabled() const noexcept { return internalSynthEnabled.load(); }
 
@@ -90,14 +92,29 @@ public:
     int addSongSection(SongPart part);
     void removeSongSection(int index);
     void duplicateSongSection(int index);
-    void selectSongSection(int index);
+    void selectSongSection(int index, bool jumpOnBeat = false);
+    int queuedSongSection() const noexcept { return queuedSection.load(); }
+    int pendingBeatJumpSection() const noexcept { return pendingBeatJump.load(); }
     void moveSongSection(int from, int to);
     void setSongSectionBars(int index, int bars);
+    void setSongSectionPart(int index, SongPart part);
     void setSectionTrackShape(int section, int track, const TrackShape& shape);
     void setMeter(Meter meter);
+    void setMeterTransform(MeterTransform transform);
     void setSongFollow(bool shouldFollow);
     int songBarInSection() const;
     double songSectionProgress() const;
+
+    void setRecording(bool shouldRecord);
+    bool isRecording() const noexcept { return recording.load(); }
+    int keepCurrentTake();
+    void restoreTake(int index);
+    void removeTake(int index);
+    void deleteCurrentTake();
+    void pushIncomingMidi(const juce::MidiMessage&);
+    void recordLanePatch(int lane, const juce::String& name, int kitIndex);
+    struct PendingPatchApply { int lane = 0; juce::String name; int kitIndex = 0; };
+    void drainPendingPatches(std::vector<PendingPatchApply>& dest);
 
     int currentStep() const noexcept { return sequencer.getCurrentStep(); }
     int currentStepForTrack(int track) const noexcept { return sequencer.getTrackStep(track); }
@@ -115,6 +132,18 @@ private:
         int samplesUntil = 0;
         juce::MidiMessage message;
     };
+    struct IncomingHit
+    {
+        int note = -1;
+        float velocity = 1.0f;
+        int channel = 1;
+        int ccNumber = -1;
+        int ccValue = 0;
+        bool noteOff = false;
+        int extraType = 0;
+        int extra1 = 0;
+        int extra2 = 0;
+    };
     std::vector<PendingMidi> pendingMidi;
     std::optional<Sequencer::Trigger> queuedAudition;
     std::atomic<bool> internalSynthEnabled { false };
@@ -128,13 +157,49 @@ private:
     void dropNoteOffs(juce::MidiBuffer& midiOut, int channel, int note);
     void syncCurrentSongSection();
     void advanceSong(int numSamples);
+    void setRecordingLocked(bool shouldRecord);
+    int keepCurrentTakeLocked();
+    void removeTakeLocked(int index);
+    void wipeLiveTakeLocked();
+    void panicLaneNotesLocked();
+    void clearLivePatternForRecord();
+    bool parseIncomingHit(const juce::MidiMessage&, IncomingHit&);
+    void recordIncomingNotes(const juce::MidiBuffer& incoming, juce::MidiBuffer& midiOut, int blockSamples);
+    void recordNoteLocked(int note, float velocity, int channel, juce::MidiBuffer& midiOut, int blockSamples);
+    void recordLaneNoteLocked(int lane, int note, float velocity, int startStep, int lengthSteps);
+    void recordLaneCcLocked(int lane, int number, int value);
+    void recordLaneExtraLocked(int lane, int type, int data1, int data2);
+    void recordLanePatchLocked(int lane, const juce::String& name, int kitIndex);
+    void emitLaneStep(int step, int blockSamples);
+    void clearMidiLanesLocked();
+    void closeOpenLaneNotesLocked();
+    void beginOpenLaneNoteLocked(int lane, int note, float velocity);
+    void finishOpenLaneNoteLocked(int lane, int note);
+    void scheduleLaneMidi(const juce::MidiMessage& message, int sample, int blockSamples);
+    void cancelPendingLaneNoteOff(int channel, int note);
+    int laneStepSamples() const;
     juce::var documentToVar() const;
     bool documentFromVar(const juce::var&);
     bool writeDocumentToFile(const juce::File& file, juce::String& error);
     bool readDocumentFromFile(const juce::File& file, juce::String& error);
     double currentSampleRate = 44100.0;
     double songSamplesInSection = 0.0;
+    std::atomic<int> queuedSection { -1 };
+    std::atomic<int> pendingBeatJump { -1 };
     std::atomic<bool> playing { false };
+    std::atomic<bool> recording { false };
+    bool followBeforeRecord = true;
+    std::vector<IncomingHit> incomingHits;
+    juce::CriticalSection incomingLock;
+    juce::MidiBuffer laneMidiBlock;
+    std::vector<PendingMidi> pendingLaneMidi;
+    int lastLaneStep = -1;
+    int laneStepCounter = 0;
+    std::array<std::array<int, 128>, kMidiLanes> openNoteCount {};
+    std::array<std::array<int, 128>, kMidiLanes> openNoteStep {};
+    std::array<std::array<float, 128>, kMidiLanes> openNoteVel {};
+    std::vector<PendingPatchApply> pendingPatches;
+    juce::CriticalSection patchLock;
     std::optional<GrooveState> performBase;
 };
 }

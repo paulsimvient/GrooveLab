@@ -29,9 +29,11 @@ public:
     bool setKitByName(const juce::String& name);
     void stepKit(int delta);
 
+    void setEditorIdentity(const juce::String& title, juce::Point<int> screenPos);
+    void setPluginMidiChannel(int channel);
     void showEditor();
     void hideEditor();
-    bool isEditorOpen() const noexcept { return editorWindow != nullptr; }
+    bool isEditorOpen() const noexcept;
 
     // replace=true overwrites io with plugin audio; false mixes plugin into io.
     void process(juce::AudioBuffer<float>& io, juce::MidiBuffer& midi, bool replace);
@@ -53,7 +55,9 @@ private:
     void mixToStereo(juce::AudioBuffer<float>& dest, const juce::AudioBuffer<float>& src) const;
     juce::AudioProcessorParameter* kitParameter() const;
     void scanUjamPatches();
+    void scanUadPresets();
     void applyPatchFile(const juce::File&);
+    void applyUadPreset(const juce::File&);
     void guessCurrentPatchFromLiveState();
 
     juce::AudioPluginFormatManager formatManager;
@@ -71,6 +75,9 @@ private:
     uint32_t editorGeneration = 0;
     std::atomic<int> pendingProgramChange { -1 };
     std::atomic<int> lastMidiProgram { 0 };
+    std::atomic<int> pluginMidiChannel { 1 };
+    juce::String editorTitle;
+    juce::Point<int> editorPos { 80, 80 };
     void presentEditorNow();
 };
 }

@@ -7,8 +7,9 @@ namespace groove
 {
 GrooveEngine::GrooveEngine()
 {
+    for (auto& lane : openNoteCount)
+        lane.fill(-1);
     loadAutosave();
-    saveAutosave();
 }
 
 void GrooveEngine::prepare(double sampleRate, int maxBlockSize)
@@ -122,8 +123,9 @@ void GrooveEngine::emitTriggerMidi(juce::MidiBuffer& midiOut, const Sequencer::T
 
 void GrooveEngine::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiOut)
 {
+    juce::MidiBuffer incoming;
+    incoming.swapWith(midiOut);
     buffer.clear();
-    midiOut.clear();
 
     const int n = buffer.getNumSamples();
     const juce::ScopedLock sl(stateLock);
@@ -148,6 +150,44 @@ void GrooveEngine::process(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& m
         for (int note = 0; note < 128; ++note)
             midiOut.addEvent(juce::MidiMessage::noteOff(1, note), 0);
         midiOut.addEvent(juce::MidiMessage::allNotesOff(1), 0);
+    }
+
+    laneMidiBlock.clear();
+    if (panic)
+    {
+        pendingLaneMidi.clear();
+        for (int ch = 1; ch <= 4; ++ch)
+        {
+            for (int note = 0; note < 128; ++note)
+                laneMidiBlock.addEvent(juce::MidiMessage::noteOff(ch, note), 0);
+            laneMidiBlock.addEvent(juce::MidiMessage::allNotesOff(ch), 0);
+        }
+    }
+    else
+    {
+        std::vector<PendingMidi> laneLeft;
+        laneLeft.reserve(pendingLaneMidi.size());
+        for (auto& event : pendingLaneMidi)
+        {
+            if (event.samplesUntil < n)
+                laneMidiBlock.addEvent(event.message, juce::jmax(0, event.samplesUntil));
+            else
+                laneLeft.push_back({ event.samplesUntil - n, event.message });
+        }
+        pendingLaneMidi.swap(laneLeft);
+    }
+
+    recordIncomingNotes(incoming, midiOut, n);
+
+    if (playing.load())
+    {
+        const int step = sequencer.getCurrentStep();
+        if (step != lastLaneStep)
+        {
+            lastLaneStep = step;
+            ++laneStepCounter;
+            emitLaneStep(step, n);
+        }
     }
 
     if (queuedAudition.has_value())
@@ -193,17 +233,27 @@ void GrooveEngine::setInternalSynthEnabled(bool shouldPlay)
 
 void GrooveEngine::setPlaying(bool shouldPlay)
 {
+    if (! shouldPlay && recording.load())
+        setRecording(false);
     playing.store(shouldPlay);
     if (! shouldPlay)
+    {
         pendingAllNotesOff.store(true);
+        pendingBeatJump.store(-1);
+    }
     journal.append("transport", shouldPlay ? "play" : "stop");
 }
 
 void GrooveEngine::resetTransport()
 {
     const juce::ScopedLock sl(stateLock);
+    if (recording.load())
+        setRecordingLocked(false);
+    grooveState.captureLiveToCurrentSection();
     pendingMidi.clear();
     pendingAllNotesOff.store(true);
+    queuedSection.store(-1);
+    pendingBeatJump.store(-1);
     sequencer.reset();
     songSamplesInSection = 0.0;
     grooveState.applySongSection(0);
@@ -330,7 +380,7 @@ void GrooveEngine::setProbability(int track, int step, float value)
 void GrooveEngine::setStepMidiNote(int track, int step, int note)
 {
     const juce::ScopedLock sl(stateLock);
-    note = juce::jlimit(kUjamKitLow, kUjamKitHigh, note);
+    note = juce::jlimit(kMidiNoteLow, kMidiNoteHigh, note);
     grooveState.tracks[track].steps[step].midiNote = note;
     journal.append("step.midiNote", voiceName(track) + " step " + juce::String(step + 1)
                    + "=" + ujamKitName(note));
@@ -341,7 +391,7 @@ void GrooveEngine::setTrackMidiNote(int track, int note)
 {
     const juce::ScopedLock sl(stateLock);
     track = juce::jlimit(0, kTracks - 1, track);
-    note = juce::jlimit(kUjamKitLow, kUjamKitHigh, note);
+    note = juce::jlimit(kMidiNoteLow, kMidiNoteHigh, note);
     grooveState.tracks[track].midiNote = note;
     journal.append("track.midiNote", voiceName(track) + "=" + ujamKitName(note));
     saveAutosave();
@@ -794,6 +844,7 @@ bool GrooveEngine::importMidiFile(const juce::File& file, juce::String& error)
         sequencer.reset();
         pendingMidi.clear();
         pendingAllNotesOff.store(true);
+        grooveState.captureLiveToCurrentSection();
     }
 
     journal.append("midi.import", file.getFileName() + " · " + juce::String(totalHits)
@@ -811,35 +862,71 @@ void GrooveEngine::syncCurrentSongSection()
 void GrooveEngine::advanceSong(int numSamples)
 {
     auto& song = grooveState.song;
-    if (! song.follow || song.sections.empty())
+    if (song.sections.empty())
         return;
 
     song.current = juce::jlimit(0, (int) song.sections.size() - 1, song.current);
-    const double samplesPerBar = currentSampleRate * 60.0 / juce::jmax(1.0, grooveState.bpm)
-        * meterQuarterNotesPerBar(grooveState.meter);
+    const double samplesPerBeat = currentSampleRate * 60.0 / juce::jmax(1.0, grooveState.bpm);
+    const double samplesPerBar = samplesPerBeat * meterQuarterNotesPerBar(grooveState.meter);
     const double sectionSamples = samplesPerBar * (double) juce::jmax(1, song.sections[(size_t) song.current].bars);
+    const int jump = pendingBeatJump.load();
+    if (jump >= 0 && jump < (int) song.sections.size() && jump != song.current)
+    {
+        const double before = songSamplesInSection;
+        const double after = before + (double) numSamples;
+        const int beatBefore = (int) std::floor(before / juce::jmax(1.0, samplesPerBeat));
+        const int beatAfter = (int) std::floor(after / juce::jmax(1.0, samplesPerBeat));
+        if (beatAfter > beatBefore)
+        {
+            const double beatAt = (double) (beatBefore + 1) * samplesPerBeat;
+            const int used = juce::jlimit(0, numSamples, juce::roundToInt(beatAt - before));
+            pendingBeatJump.store(-1);
+            queuedSection.store(-1);
+            grooveState.captureLiveToCurrentSection();
+            grooveState.applySongSection(jump);
+            songSamplesInSection = (double) juce::jmax(0, numSamples - used);
+            pendingAllNotesOff.store(true);
+            return;
+        }
+    }
+
     songSamplesInSection += (double) numSamples;
     if (songSamplesInSection < sectionSamples)
         return;
 
     songSamplesInSection = std::fmod(songSamplesInSection, sectionSamples);
-    const int next = (song.current + 1) % (int) song.sections.size();
+    pendingBeatJump.store(-1);
+    const int queued = queuedSection.exchange(-1);
+    int next = song.current;
+    if (queued >= 0 && queued < (int) song.sections.size())
+        next = queued;
+    else if (song.follow)
+        next = (song.current + 1) % (int) song.sections.size();
+    else
+        return;
+
+    if (next == song.current)
+        return;
+    grooveState.captureLiveToCurrentSection();
     grooveState.applySongSection(next);
+    pendingAllNotesOff.store(true);
 }
 
 int GrooveEngine::addSongSection(SongPart part)
 {
     const juce::ScopedLock sl(stateLock);
+    grooveState.captureLiveToCurrentSection();
     SongSection section;
     section.part = part;
     section.bars = (part == SongPart::chorus ? 8 : part == SongPart::fill ? 1 : 4);
     section.meter = grooveState.meter;
-    for (int t = 0; t < kTracks; ++t)
-        section.shapes[(size_t) t] = TrackShape::fromTrack(grooveState.tracks[t]);
+    copyPatternFromTracks(section, grooveState.tracks);
     grooveState.song.sections.push_back(section);
     const int index = (int) grooveState.song.sections.size() - 1;
     grooveState.applySongSection(index);
     songSamplesInSection = 0.0;
+    queuedSection.store(-1);
+    pendingBeatJump.store(-1);
     saveAutosave();
     return index;
 }
@@ -853,12 +940,15 @@ void GrooveEngine::removeSongSection(int index)
     sections.erase(sections.begin() + index);
     grooveState.applySongSection(juce::jmin(index, (int) sections.size() - 1));
     songSamplesInSection = 0.0;
+    queuedSection.store(-1);
+    pendingBeatJump.store(-1);
     saveAutosave();
 }
 
 void GrooveEngine::duplicateSongSection(int index)
 {
     const juce::ScopedLock sl(stateLock);
+    grooveState.captureLiveToCurrentSection();
     auto& sections = grooveState.song.sections;
     if (index < 0 || index >= (int) sections.size())
         return;
@@ -868,11 +958,34 @@ void GrooveEngine::duplicateSongSection(int index)
     saveAutosave();
 }
 
-void GrooveEngine::selectSongSection(int index)
+void GrooveEngine::selectSongSection(int index, bool jumpOnBeat)
 {
     const juce::ScopedLock sl(stateLock);
     if (grooveState.song.sections.empty())
         return;
+    index = juce::jlimit(0, (int) grooveState.song.sections.size() - 1, index);
+
+    grooveState.song.follow = false;
+    if (playing.load() && jumpOnBeat)
+    {
+        queuedSection.store(-1);
+        pendingBeatJump.store(index == grooveState.song.current ? -1 : index);
+        saveAutosave();
+        return;
+    }
+    pendingBeatJump.store(-1);
+    if (playing.load() && ! recording.load())
+    {
+        if (index == grooveState.song.current)
+            queuedSection.store(-1);
+        else
+            queuedSection.store(index);
+        saveAutosave();
+        return;
+    }
+
+    queuedSection.store(-1);
+    grooveState.captureLiveToCurrentSection();
     grooveState.applySongSection(index);
     songSamplesInSection = 0.0;
     saveAutosave();
@@ -921,24 +1034,110 @@ void GrooveEngine::setSongSectionBars(int index, int bars)
     saveAutosave();
 }
 
+void GrooveEngine::setSongSectionPart(int index, SongPart part)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (index < 0 || index >= (int) grooveState.song.sections.size())
+        return;
+    grooveState.song.sections[(size_t) index].part = part;
+    saveAutosave();
+}
+
+namespace
+{
+Step bakedResolvedStep(const Track& tr, int step, bool hit)
+{
+    Step out = tr.steps[(size_t) juce::jlimit(0, kSteps - 1, step)];
+    out.overrideMode = hit ? StepOverrideMode::forceOn : StepOverrideMode::forceOff;
+    out.active = hit;
+    return out;
+}
+
+void finishBakedTrack(Track& tr, std::array<Step, kSteps> steps, int newLen)
+{
+    newLen = juce::jlimit(1, kSteps, newLen);
+    int hits = 0;
+    for (int i = 0; i < newLen; ++i)
+        if (steps[(size_t) i].overrideMode == StepOverrideMode::forceOn)
+            ++hits;
+    tr.steps = steps;
+    tr.generatorSteps = newLen;
+    tr.pulses = hits;
+    tr.rotate = 0;
+}
+
+void cropTrackToMeter(Track& tr, int oldSpb, int newSpb)
+{
+    oldSpb = juce::jmax(1, oldSpb);
+    newSpb = juce::jmax(1, newSpb);
+    const int oldLen = juce::jmax(1, tr.generatorSteps);
+    std::array<Step, kSteps> out {};
+    int n = 0;
+    int s = 0;
+    while (s < oldLen && n < kSteps)
+    {
+        const int thisOldBar = juce::jmin(oldSpb, oldLen - s);
+        const int keep = juce::jmin(newSpb, thisOldBar);
+        for (int i = 0; i < keep && n < kSteps; ++i)
+        {
+            const int src = s + i;
+            out[(size_t) n++] = bakedResolvedStep(tr, src, Sequencer::resolvedStepActive(tr, src));
+        }
+        for (int i = thisOldBar; i < newSpb && n < kSteps; ++i)
+        {
+            Step empty {};
+            empty.overrideMode = StepOverrideMode::forceOff;
+            out[(size_t) n++] = empty;
+        }
+        s += thisOldBar;
+    }
+    finishBakedTrack(tr, out, juce::jmax(1, n));
+}
+
+void squeezeTrackToMeter(Track& tr, int oldSpb, int newSpb)
+{
+    oldSpb = juce::jmax(1, oldSpb);
+    newSpb = juce::jmax(1, newSpb);
+    const int oldLen = juce::jmax(1, tr.generatorSteps);
+    const int newLen = juce::jlimit(1, kSteps, (oldLen * newSpb + oldSpb / 2) / oldSpb);
+    std::array<Step, kSteps> out {};
+    for (int i = 0; i < newLen; ++i)
+        out[(size_t) i].overrideMode = StepOverrideMode::forceOff;
+
+    for (int s = 0; s < oldLen; ++s)
+    {
+        if (! Sequencer::resolvedStepActive(tr, s))
+            continue;
+        int dst = (s * newSpb + oldSpb / 2) / oldSpb;
+        dst = juce::jlimit(0, newLen - 1, dst);
+        auto candidate = bakedResolvedStep(tr, s, true);
+        auto& dest = out[(size_t) dst];
+        if (dest.overrideMode != StepOverrideMode::forceOn
+            || candidate.velocity >= dest.velocity)
+            dest = candidate;
+    }
+    finishBakedTrack(tr, out, newLen);
+}
+}
+
 void GrooveEngine::setMeter(Meter meter)
 {
     const juce::ScopedLock sl(stateLock);
-    const int oldSpb = juce::jmax(1, meterStepsPerBar(grooveState.meter));
+    const auto from = grooveState.meter;
+    if (from == meter)
+        return;
+    const auto transform = grooveState.meterTransform;
     grooveState.meter = meter;
-    const int spb = juce::jmax(1, meterStepsPerBar(meter));
-    for (auto& tr : grooveState.tracks)
+    if (transform != MeterTransform::reflow)
     {
-        int bars = juce::jmax(1, (tr.generatorSteps + oldSpb / 2) / oldSpb);
-        int next = bars * spb;
-        if (next > kSteps)
-            next = spb;
-        tr.generatorSteps = juce::jlimit(1, kSteps, next);
-        tr.pulses = juce::jlimit(0, tr.generatorSteps, tr.pulses);
-        for (auto& st : tr.steps)
+        const int oldSpb = meterStepsPerBar(from);
+        const int newSpb = meterStepsPerBar(meter);
+        for (auto& tr : grooveState.tracks)
         {
-            st.overrideMode = StepOverrideMode::inherit;
-            st.active = false;
+            if (transform == MeterTransform::crop)
+                cropTrackToMeter(tr, oldSpb, newSpb);
+            else
+                squeezeTrackToMeter(tr, oldSpb, newSpb);
         }
     }
     if (! grooveState.song.sections.empty())
@@ -948,6 +1147,516 @@ void GrooveEngine::setMeter(Meter meter)
         grooveState.song.sections[(size_t) i].meter = meter;
         grooveState.captureLiveToCurrentSection();
     }
+    saveAutosave();
+}
+
+void GrooveEngine::setMeterTransform(MeterTransform transform)
+{
+    const juce::ScopedLock sl(stateLock);
+    grooveState.meterTransform = transform;
+    saveAutosave();
+}
+
+void GrooveEngine::takeLaneMidi(juce::MidiBuffer& dest)
+{
+    dest.swapWith(laneMidiBlock);
+}
+
+void GrooveEngine::pushIncomingMidi(const juce::MidiMessage& message)
+{
+    IncomingHit hit;
+    if (! parseIncomingHit(message, hit))
+        return;
+    const juce::ScopedLock sl(incomingLock);
+    incomingHits.push_back(hit);
+}
+
+bool GrooveEngine::parseIncomingHit(const juce::MidiMessage& message, IncomingHit& hit)
+{
+    hit = {};
+    hit.channel = juce::jlimit(1, 16, message.getChannel() > 0 ? message.getChannel() : 1);
+    if (message.isNoteOn() && message.getVelocity() > 0)
+    {
+        hit.note = message.getNoteNumber();
+        hit.velocity = juce::jlimit(0.05f, 1.2f, message.getVelocity() / 127.0f);
+        return true;
+    }
+    if (message.isNoteOff() || (message.isNoteOn() && message.getVelocity() == 0))
+    {
+        hit.note = message.getNoteNumber();
+        hit.noteOff = true;
+        return true;
+    }
+    if (message.isController())
+    {
+        hit.ccNumber = message.getControllerNumber();
+        hit.ccValue = message.getControllerValue();
+        return true;
+    }
+    if (message.isPitchWheel())
+    {
+        hit.extraType = 1;
+        hit.extra1 = message.getPitchWheelValue();
+        return true;
+    }
+    if (message.isChannelPressure())
+    {
+        hit.extraType = 2;
+        hit.extra1 = message.getChannelPressureValue();
+        return true;
+    }
+    if (message.isAftertouch())
+    {
+        hit.extraType = 3;
+        hit.extra1 = message.getNoteNumber();
+        hit.extra2 = message.getAfterTouchValue();
+        return true;
+    }
+    if (message.isProgramChange())
+    {
+        hit.extraType = 4;
+        hit.extra1 = message.getProgramChangeNumber();
+        return true;
+    }
+    return false;
+}
+
+void GrooveEngine::recordIncomingNotes(const juce::MidiBuffer& incoming, juce::MidiBuffer& midiOut,
+                                       int blockSamples)
+{
+    std::vector<IncomingHit> hits;
+    {
+        const juce::ScopedLock sl(incomingLock);
+        hits.swap(incomingHits);
+    }
+    for (const auto metadata : incoming)
+    {
+        IncomingHit hit;
+        if (parseIncomingHit(metadata.getMessage(), hit))
+            hits.push_back(hit);
+    }
+    if (! recording.load() || hits.empty())
+        return;
+    for (const auto& hit : hits)
+    {
+        const int lane = midiLaneIndexForChannel(hit.channel);
+        if (hit.ccNumber >= 0)
+        {
+            if (lane >= 0)
+                recordLaneCcLocked(lane, hit.ccNumber, hit.ccValue);
+            continue;
+        }
+        if (hit.extraType > 0)
+        {
+            if (lane >= 0)
+                recordLaneExtraLocked(lane, hit.extraType, hit.extra1, hit.extra2);
+            continue;
+        }
+        if (hit.noteOff)
+        {
+            if (lane >= 0)
+                finishOpenLaneNoteLocked(lane, hit.note);
+            continue;
+        }
+        if (lane >= 0)
+            beginOpenLaneNoteLocked(lane, hit.note, hit.velocity);
+        recordNoteLocked(hit.note, hit.velocity, hit.channel, midiOut, blockSamples);
+    }
+}
+
+void GrooveEngine::recordLaneNoteLocked(int lane, int note, float velocity, int startStep, int lengthSteps)
+{
+    if (lane < 0 || lane >= kMidiLanes)
+        return;
+    auto& L = grooveState.midiLanes[(size_t) lane];
+    const int step = juce::jlimit(0, kSteps - 1, startStep);
+    const int len = juce::jmax(1, lengthSteps);
+    for (auto& existing : L.notes)
+        if (existing.step == step && existing.note == note)
+        {
+            existing.velocity = juce::jlimit(0.05f, 1.2f, velocity);
+            existing.lengthSteps = juce::jmax(existing.lengthSteps, len);
+            return;
+        }
+    L.notes.push_back({ step, juce::jlimit(0, 127, note), juce::jlimit(0.05f, 1.2f, velocity), len });
+}
+
+void GrooveEngine::recordLaneExtraLocked(int lane, int type, int data1, int data2)
+{
+    if (lane < 0 || lane >= kMidiLanes || type <= 0)
+        return;
+    auto& L = grooveState.midiLanes[(size_t) lane];
+    const int step = juce::jlimit(0, kSteps - 1, sequencer.getCurrentStep());
+    for (auto& existing : L.extras)
+        if (existing.step == step && existing.type == type
+            && (type != 3 || existing.data1 == data1))
+        {
+            existing.data1 = data1;
+            existing.data2 = data2;
+            return;
+        }
+    L.extras.push_back({ step, type, data1, data2 });
+}
+
+void GrooveEngine::beginOpenLaneNoteLocked(int lane, int note, float velocity)
+{
+    if (lane < 0 || lane >= kMidiLanes || note < 0 || note > 127)
+        return;
+    openNoteCount[(size_t) lane][(size_t) note] = laneStepCounter;
+    openNoteStep[(size_t) lane][(size_t) note] = juce::jlimit(0, kSteps - 1, sequencer.getCurrentStep());
+    openNoteVel[(size_t) lane][(size_t) note] = juce::jlimit(0.05f, 1.2f, velocity);
+}
+
+void GrooveEngine::finishOpenLaneNoteLocked(int lane, int note)
+{
+    if (lane < 0 || lane >= kMidiLanes || note < 0 || note > 127)
+        return;
+    const int start = openNoteCount[(size_t) lane][(size_t) note];
+    if (start < 0)
+        return;
+    const int length = juce::jmax(1, laneStepCounter - start);
+    recordLaneNoteLocked(lane, note, openNoteVel[(size_t) lane][(size_t) note],
+                         openNoteStep[(size_t) lane][(size_t) note], length);
+    openNoteCount[(size_t) lane][(size_t) note] = -1;
+}
+
+void GrooveEngine::closeOpenLaneNotesLocked()
+{
+    for (int lane = 0; lane < kMidiLanes; ++lane)
+        for (int note = 0; note < 128; ++note)
+            finishOpenLaneNoteLocked(lane, note);
+}
+
+void GrooveEngine::recordLaneCcLocked(int lane, int number, int value)
+{
+    if (lane < 0 || lane >= kMidiLanes)
+        return;
+    auto& L = grooveState.midiLanes[(size_t) lane];
+    const int step = juce::jlimit(0, kSteps - 1, sequencer.getCurrentStep());
+    for (auto& existing : L.ccs)
+        if (existing.step == step && existing.number == number)
+        {
+            existing.value = juce::jlimit(0, 127, value);
+            return;
+        }
+    L.ccs.push_back({ step, juce::jlimit(0, 127, number), juce::jlimit(0, 127, value) });
+}
+
+void GrooveEngine::recordLanePatchLocked(int lane, const juce::String& name, int kitIndex)
+{
+    if (lane < 0 || lane >= kMidiLanes || name.isEmpty())
+        return;
+    auto& L = grooveState.midiLanes[(size_t) lane];
+    const int step = juce::jlimit(0, kSteps - 1, sequencer.getCurrentStep());
+    if (! L.patches.empty())
+    {
+        auto& last = L.patches.back();
+        if (last.step == step && last.name == name && last.kitIndex == kitIndex)
+            return;
+        if (last.name == name && last.kitIndex == kitIndex)
+            return;
+    }
+    L.patches.push_back({ step, name, juce::jmax(0, kitIndex) });
+}
+
+void GrooveEngine::recordLanePatch(int lane, const juce::String& name, int kitIndex)
+{
+    if (! recording.load())
+        return;
+    const juce::ScopedLock sl(stateLock);
+    recordLanePatchLocked(lane, name, kitIndex);
+}
+
+void GrooveEngine::drainPendingPatches(std::vector<PendingPatchApply>& dest)
+{
+    const juce::ScopedLock sl(patchLock);
+    dest.swap(pendingPatches);
+    pendingPatches.clear();
+}
+
+int GrooveEngine::laneStepSamples() const
+{
+    const auto division = juce::jlimit(0.25f, 4.0f, grooveState.tracks[0].division);
+    return juce::jmax(1, (int) std::round(
+        currentSampleRate * 60.0 / juce::jmax(1.0, grooveState.bpm) / 4.0 / (double) division));
+}
+
+void GrooveEngine::scheduleLaneMidi(const juce::MidiMessage& message, int sample, int blockSamples)
+{
+    if (sample < blockSamples)
+        laneMidiBlock.addEvent(message, juce::jlimit(0, blockSamples - 1, sample));
+    else
+        pendingLaneMidi.push_back({ sample - blockSamples, message });
+}
+
+void GrooveEngine::cancelPendingLaneNoteOff(int channel, int note)
+{
+    pendingLaneMidi.erase(std::remove_if(pendingLaneMidi.begin(), pendingLaneMidi.end(),
+        [channel, note](const PendingMidi& event)
+        {
+            return event.message.isNoteOff()
+                && event.message.getChannel() == channel
+                && event.message.getNoteNumber() == note;
+        }), pendingLaneMidi.end());
+}
+
+void GrooveEngine::emitLaneStep(int step, int blockSamples)
+{
+    const int stepSamples = laneStepSamples();
+    for (int lane = 0; lane < kMidiLanes; ++lane)
+    {
+        const auto& L = grooveState.midiLanes[(size_t) lane];
+        const int ch = juce::jlimit(1, 16, L.channel);
+        for (const auto& n : L.notes)
+        {
+            if (n.step != step)
+                continue;
+            const auto vel = (juce::uint8) juce::jlimit(1, 127, (int) std::round(n.velocity * 127.0f));
+            cancelPendingLaneNoteOff(ch, n.note);
+            scheduleLaneMidi(juce::MidiMessage::noteOff(ch, n.note), 0, blockSamples);
+            scheduleLaneMidi(juce::MidiMessage::noteOn(ch, n.note, vel), 0, blockSamples);
+            const int noteLen = juce::jmax(stepSamples / 4, juce::jmax(1, n.lengthSteps) * stepSamples);
+            scheduleLaneMidi(juce::MidiMessage::noteOff(ch, n.note), noteLen, blockSamples);
+        }
+        for (const auto& c : L.ccs)
+            if (c.step == step)
+                scheduleLaneMidi(juce::MidiMessage::controllerEvent(ch, c.number, c.value), 0, blockSamples);
+        for (const auto& e : L.extras)
+        {
+            if (e.step != step)
+                continue;
+            if (e.type == 1)
+                scheduleLaneMidi(juce::MidiMessage::pitchWheel(ch, juce::jlimit(0, 16383, e.data1)), 0, blockSamples);
+            else if (e.type == 2)
+                scheduleLaneMidi(juce::MidiMessage::channelPressureChange(ch, juce::jlimit(0, 127, e.data1)), 0, blockSamples);
+            else if (e.type == 3)
+                scheduleLaneMidi(juce::MidiMessage::aftertouchChange(ch, juce::jlimit(0, 127, e.data1),
+                                                                    juce::jlimit(0, 127, e.data2)), 0, blockSamples);
+            else if (e.type == 4)
+                scheduleLaneMidi(juce::MidiMessage::programChange(ch, juce::jlimit(0, 127, e.data1)), 0, blockSamples);
+        }
+        for (const auto& p : L.patches)
+        {
+            if (p.step != step)
+                continue;
+            const juce::ScopedLock sl(patchLock);
+            pendingPatches.push_back({ lane, p.name, p.kitIndex });
+        }
+    }
+}
+
+void GrooveEngine::recordNoteLocked(int note, float velocity, int channel, juce::MidiBuffer& midiOut, int blockSamples)
+{
+    const int lane = midiLaneIndexForChannel(channel);
+
+    const int track = trackIndexForUjamNote(note);
+    if (track < 0 || lane > 0)
+        return;
+    auto& tr = grooveState.tracks[track];
+    const int length = juce::jmax(1, tr.generatorSteps);
+    int step = sequencer.getTrackStep(track) % length;
+    if (step < 0)
+        step += length;
+    auto& st = tr.steps[(size_t) step];
+    st.overrideMode = StepOverrideMode::forceOn;
+    st.active = true;
+    st.velocity = juce::jlimit(0.05f, 1.2f, velocity);
+    st.midiNote = note;
+    int pulses = 0;
+    for (int s = 0; s < length; ++s)
+        if (tr.steps[(size_t) s].overrideMode == StepOverrideMode::forceOn)
+            ++pulses;
+    tr.pulses = pulses;
+
+    Sequencer::Trigger trig { track, step, st.velocity,
+                              grooveState.effectiveParams(track, step), 1, 0 };
+    emitTriggerMidi(midiOut, trig, blockSamples);
+    if (internalSynthEnabled.load())
+        synth.trigger(track, trig.params, trig.velocity);
+}
+
+void GrooveEngine::clearLivePatternForRecord()
+{
+    for (auto& tr : grooveState.tracks)
+    {
+        const int length = juce::jmax(1, tr.generatorSteps);
+        int hits = 0;
+        for (int s = 0; s < kSteps; ++s)
+        {
+            if (s >= length)
+                continue;
+            auto& st = tr.steps[(size_t) s];
+            st.overrideMode = StepOverrideMode::forceOff;
+            st.active = false;
+        }
+        tr.pulses = hits;
+        tr.rotate = 0;
+    }
+    clearMidiLanesLocked();
+}
+
+void GrooveEngine::clearMidiLanesLocked()
+{
+    for (auto& lane : openNoteCount)
+        lane.fill(-1);
+    grooveState.midiLanes = makeDefaultMidiLanes();
+    lastLaneStep = -1;
+    pendingLaneMidi.clear();
+}
+
+int GrooveEngine::keepCurrentTakeLocked()
+{
+    if (grooveState.song.sections.empty())
+        return -1;
+    closeOpenLaneNotesLocked();
+    grooveState.captureLiveToCurrentSection();
+    auto& section = grooveState.song.sections[(size_t) grooveState.song.current];
+    if ((int) section.takes.size() >= kMaxTakes)
+        return section.currentTake;
+    PatternTake take;
+    const int n = (int) section.takes.size();
+    take.label = n < 26 ? juce::String::formatted("%c", 'A' + n)
+                        : "T" + juce::String(n + 1);
+    take.shapes = section.shapes;
+    take.steps = section.steps;
+    take.midiLanes = section.midiLanes;
+    section.takes.push_back(std::move(take));
+    section.currentTake = (int) section.takes.size() - 1;
+    return section.currentTake;
+}
+
+void GrooveEngine::setRecordingLocked(bool shouldRecord)
+{
+    if (shouldRecord == recording.load())
+        return;
+    if (shouldRecord)
+    {
+        if (! grooveState.song.sections.empty())
+        {
+            auto& section = grooveState.song.sections[(size_t) grooveState.song.current];
+            if (section.takes.empty())
+                keepCurrentTakeLocked();
+            section.currentTake = -1;
+        }
+        recording.store(true);
+        if (! playing.load())
+            playing.store(true);
+        journal.append("record", "arm");
+    }
+    else
+    {
+        recording.store(false);
+        closeOpenLaneNotesLocked();
+        grooveState.captureLiveToCurrentSection();
+        journal.append("record", "commit");
+    }
+}
+
+void GrooveEngine::setRecording(bool shouldRecord)
+{
+    const juce::ScopedLock sl(stateLock);
+    setRecordingLocked(shouldRecord);
+}
+
+int GrooveEngine::keepCurrentTake()
+{
+    const juce::ScopedLock sl(stateLock);
+    const int id = keepCurrentTakeLocked();
+    saveAutosave();
+    return id;
+}
+
+void GrooveEngine::removeTakeLocked(int index)
+{
+    if (grooveState.song.sections.empty())
+        return;
+    auto& section = grooveState.song.sections[(size_t) grooveState.song.current];
+    if (index < 0 || index >= (int) section.takes.size())
+        return;
+    const bool wasCurrent = (section.currentTake == index);
+    section.takes.erase(section.takes.begin() + index);
+    if (section.takes.empty())
+    {
+        section.currentTake = -1;
+        return;
+    }
+    if (wasCurrent)
+    {
+        const int next = juce::jmin(index, (int) section.takes.size() - 1);
+        const auto& take = section.takes[(size_t) next];
+        section.shapes = take.shapes;
+        section.steps = take.steps;
+        section.midiLanes = take.midiLanes;
+        section.currentTake = next;
+        grooveState.applySongSection(grooveState.song.current);
+        return;
+    }
+    if (section.currentTake > index)
+        --section.currentTake;
+}
+
+void GrooveEngine::removeTake(int index)
+{
+    const juce::ScopedLock sl(stateLock);
+    removeTakeLocked(index);
+    saveAutosave();
+}
+
+void GrooveEngine::panicLaneNotesLocked()
+{
+    pendingLaneMidi.clear();
+    lastLaneStep = -1;
+    for (int ch = 1; ch <= 4; ++ch)
+    {
+        pendingLaneMidi.push_back({ 0, juce::MidiMessage::allNotesOff(ch) });
+        pendingLaneMidi.push_back({ 0, juce::MidiMessage::allSoundOff(ch) });
+    }
+}
+
+void GrooveEngine::wipeLiveTakeLocked()
+{
+    for (auto& lane : openNoteCount)
+        lane.fill(-1);
+    grooveState.midiLanes = makeDefaultMidiLanes();
+    panicLaneNotesLocked();
+    if (! grooveState.song.sections.empty())
+    {
+        auto& section = grooveState.song.sections[(size_t) grooveState.song.current];
+        section.midiLanes = grooveState.midiLanes;
+        section.currentTake = -1;
+    }
+}
+
+void GrooveEngine::deleteCurrentTake()
+{
+    const juce::ScopedLock sl(stateLock);
+    if (grooveState.song.sections.empty())
+        return;
+    auto& section = grooveState.song.sections[(size_t) grooveState.song.current];
+    if (! recording.load() && section.currentTake >= 0)
+        removeTakeLocked(section.currentTake);
+    else
+        wipeLiveTakeLocked();
+    saveAutosave();
+}
+
+void GrooveEngine::restoreTake(int index)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (grooveState.song.sections.empty())
+        return;
+    if (recording.load())
+        setRecordingLocked(false);
+    grooveState.captureLiveToCurrentSection();
+    auto& section = grooveState.song.sections[(size_t) grooveState.song.current];
+    if (index < 0 || index >= (int) section.takes.size())
+        return;
+    const auto& take = section.takes[(size_t) index];
+    section.shapes = take.shapes;
+    section.steps = take.steps;
+    section.midiLanes = take.midiLanes;
+    section.currentTake = index;
+    grooveState.applySongSection(grooveState.song.current);
     saveAutosave();
 }
 
@@ -1023,9 +1732,6 @@ double GrooveEngine::songSectionProgress() const
 
 void GrooveEngine::saveAutosave()
 {
-    if (performBase.has_value()) return;
-    juce::String error;
-    writeDocumentToFile(journal.getStateFile(), error);
 }
 
 bool GrooveEngine::loadAutosave()
@@ -1210,11 +1916,33 @@ void GrooveEngine::newProject()
         const int keepMode = grooveState.soundMode;
         const int keepProgram = grooveState.lastPluginProgram;
         const auto keepPatch = grooveState.lastPluginPatch;
+        const auto keepSynth = grooveState.lastSynthPluginPath;
+        const auto keepSynthPatch = grooveState.lastSynthPatch;
+        const int keepSynthOctave = grooveState.lastSynthOctave;
+        const int keepKbTarget = grooveState.lastKeyboardTarget;
+        const int keepKeysPlugin = grooveState.keysPlugin;
+        const auto keepKeysPath = grooveState.lastKeysPluginPath;
+        const auto keepPolyPath = grooveState.lastPolymaxPluginPath;
+        const auto keepElectra = grooveState.lastElectraPatch;
+        const auto keepPolymax = grooveState.lastPolymaxPatch;
+        const auto keepMix = grooveState.mix;
+        const auto keepTransform = grooveState.meterTransform;
         grooveState = GrooveState();
         grooveState.lastPluginPath = keepPlugin;
         grooveState.soundMode = keepMode;
         grooveState.lastPluginProgram = keepProgram;
         grooveState.lastPluginPatch = keepPatch;
+        grooveState.lastSynthPluginPath = keepSynth;
+        grooveState.lastSynthPatch = keepSynthPatch;
+        grooveState.lastSynthOctave = keepSynthOctave;
+        grooveState.lastKeyboardTarget = keepKbTarget;
+        grooveState.keysPlugin = keepKeysPlugin;
+        grooveState.lastKeysPluginPath = keepKeysPath;
+        grooveState.lastPolymaxPluginPath = keepPolyPath;
+        grooveState.lastElectraPatch = keepElectra;
+        grooveState.lastPolymaxPatch = keepPolymax;
+        grooveState.mix = keepMix;
+        grooveState.meterTransform = keepTransform;
         ancestryGraph = {};
         sequencer.reset();
         songSamplesInSection = 0.0;

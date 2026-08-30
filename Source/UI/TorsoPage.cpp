@@ -138,7 +138,9 @@ void TorsoPage::bindStepKnobs()
         if (refreshing) return;
         const int t = engine.state().selectedTrack;
         const int s = engine.state().selectedStep;
-        const int note = kitNote.getSelectedId();
+        const int id = kitNote.getSelectedId();
+        if (id <= 0) return;
+        const int note = id - 1;
         engine.setTrackMidiNote(t, note);
         engine.setStepMidiNote(t, s, note);
         if (onPatternChanged) onPatternChanged();
@@ -211,7 +213,7 @@ void TorsoPage::refreshFromEngine()
     division.setSelectedId(did, juce::dontSendNotification);
 
     velocity.setValue(step.velocity, juce::dontSendNotification);
-    kitNote.setSelectedId(engine.effectiveMidiNote(st.selectedTrack, st.selectedStep),
+    kitNote.setSelectedId(engine.effectiveMidiNote(st.selectedTrack, st.selectedStep) + 1,
                           juce::dontSendNotification);
     probability.setValue(step.probability, juce::dontSendNotification);
     repeats.setValue((double) juce::jmax(1, step.ratchet), juce::dontSendNotification);

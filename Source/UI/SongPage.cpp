@@ -1,5 +1,6 @@
 #include "SongPage.h"
 #include <array>
+#include <cmath>
 
 namespace
 {
@@ -73,6 +74,23 @@ SongPage::SongPage(groove::GrooveEngine& e)
     bindAdd(fillButton, groove::SongPart::fill);
     bindAdd(outroButton, groove::SongPart::outro);
 
+    static constexpr groove::SongPart kAllParts[] = {
+        groove::SongPart::intro, groove::SongPart::verse, groove::SongPart::prechorus,
+        groove::SongPart::chorus, groove::SongPart::bridge, groove::SongPart::breakdown,
+        groove::SongPart::fill, groove::SongPart::outro
+    };
+    for (const auto part : kAllParts)
+        partBox.addItem(groove::songPartName(part), (int) part + 1);
+    partBox.onChange = [this]
+    {
+        if (refreshing) return;
+        engine.setSongSectionPart(engine.state().song.current,
+                                  (groove::SongPart) (partBox.getSelectedId() - 1));
+        if (onSongChanged) onSongChanged();
+        repaint();
+    };
+    addAndMakeVisible(partBox);
+
     for (int i = 1; i <= 16; ++i)
         barsBox.addItem(juce::String(i) + (i == 1 ? " BAR" : " BARS"), i);
     barsBox.onChange = [this]
@@ -83,6 +101,12 @@ SongPage::SongPage(groove::GrooveEngine& e)
         repaint();
     };
     addAndMakeVisible(barsBox);
+    barMinus.setTooltip("Shrink this section by half (8 → 4 bars)");
+    barPlus.setTooltip("Stretch this section by doubling (4 → 8 bars, repeats)");
+    barMinus.onClick = [this] { expandOrContractBars(engine.state().song.current, false); };
+    barPlus.onClick = [this] { expandOrContractBars(engine.state().song.current, true); };
+    addAndMakeVisible(barMinus);
+    addAndMakeVisible(barPlus);
 
     for (int i = 0; i < groove::kMeterCount; ++i)
         meterBox.addItem(groove::meterName((groove::Meter) i), i + 1);
@@ -94,6 +118,60 @@ SongPage::SongPage(groove::GrooveEngine& e)
         if (onSongChanged) onSongChanged();
     };
     addAndMakeVisible(meterBox);
+    for (int i = 0; i < groove::kMeterTransformCount; ++i)
+        meterTransformBox.addItem(groove::meterTransformName((groove::MeterTransform) i), i + 1);
+    meterTransformBox.setTooltip("CROP drops extra beats. REFLOW keeps the groove and moves bar lines. SQUEEZE fits the old bar into the new one.");
+    meterTransformBox.onChange = [this]
+    {
+        if (refreshing) return;
+        engine.setMeterTransform((groove::MeterTransform) (meterTransformBox.getSelectedId() - 1));
+        if (onSongChanged) onSongChanged();
+        repaint();
+    };
+    addAndMakeVisible(meterTransformBox);
+
+    recButton.setClickingTogglesState(true);
+    recButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffc62828));
+    recButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    recButton.onClick = [this]
+    {
+        engine.setRecording(recButton.getToggleState());
+        refreshFromEngine();
+        if (onSongChanged) onSongChanged();
+        repaint();
+    };
+    addAndMakeVisible(recButton);
+    keepTakeButton.onClick = [this]
+    {
+        engine.keepCurrentTake();
+        refreshFromEngine();
+        if (onSongChanged) onSongChanged();
+        repaint();
+    };
+    addAndMakeVisible(keepTakeButton);
+    deleteTakeButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3b1010));
+    deleteTakeButton.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffff8a8a));
+    deleteTakeButton.onClick = [this]
+    {
+        engine.deleteCurrentTake();
+        refreshFromEngine();
+        if (onSongChanged) onSongChanged();
+        repaint();
+    };
+    addAndMakeVisible(deleteTakeButton);
+
+    for (int i = 0; i < groove::kMidiLanes; ++i)
+    {
+        laneHits[(size_t) i].onPick = [this, i](bool openUi)
+        {
+            const int ch = groove::midiLaneChannel(i);
+            if (onChannelClicked)
+                onChannelClicked(ch);
+            if (openUi && onInstrumentUiClicked)
+                onInstrumentUiClicked(ch);
+        };
+        addAndMakeVisible(laneHits[(size_t) i]);
+    }
 
     duplicateButton.onClick = [this]
     {
@@ -160,6 +238,91 @@ SongPage::SongPage(groove::GrooveEngine& e)
     startTimerHz(24);
 }
 
+void SongPage::setActiveMidiChannel(int channel)
+{
+    activeMidiChannel = juce::jlimit(1, 16, channel > 0 ? channel : 1);
+    repaint();
+}
+
+void SongPage::showPartMenu(int sectionIndex, juce::Point<int> screenPos)
+{
+    const auto& sections = engine.state().song.sections;
+    if (sectionIndex < 0 || sectionIndex >= (int) sections.size())
+        return;
+
+    juce::PopupMenu menu;
+    static constexpr groove::SongPart kAllParts[] = {
+        groove::SongPart::intro, groove::SongPart::verse, groove::SongPart::prechorus,
+        groove::SongPart::chorus, groove::SongPart::bridge, groove::SongPart::breakdown,
+        groove::SongPart::fill, groove::SongPart::outro
+    };
+    const auto current = sections[(size_t) sectionIndex].part;
+    for (const auto part : kAllParts)
+        menu.addItem((int) part + 1, groove::songPartName(part), true, part == current);
+
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(
+                           { screenPos.x, screenPos.y, 1, 1 }),
+        [this, sectionIndex](int result)
+        {
+            if (result <= 0)
+                return;
+            engine.setSongSectionPart(sectionIndex, (groove::SongPart) (result - 1));
+            refreshFromEngine();
+            if (onSongChanged) onSongChanged();
+        });
+}
+
+juce::Rectangle<int> SongPage::sectionNameArea(int index) const
+{
+    auto tile = sectionTile(index);
+    if (tile.isEmpty())
+        return {};
+    return tile.reduced(8, 8).removeFromTop(22).withTrimmedRight(52);
+}
+
+juce::Rectangle<int> SongPage::sectionDeleteArea(int index) const
+{
+    auto tile = sectionTile(index);
+    if (tile.isEmpty())
+        return {};
+    return tile.reduced(6, 6).removeFromTop(18).removeFromRight(18);
+}
+
+juce::Rectangle<int> SongPage::sectionResizeHandle(int index) const
+{
+    auto tile = sectionTile(index);
+    if (tile.isEmpty())
+        return {};
+    return tile.removeFromRight(juce::jlimit(18, 28, tile.getWidth() / 4));
+}
+
+int SongPage::midiLaneAt(juce::Point<int> pos) const
+{
+    auto r = lanesPanel;
+    r.removeFromTop(34);
+    if (! r.contains(pos))
+        return -1;
+    const int rowH = juce::jmax(18, r.getHeight() / groove::kMidiLanes);
+    const int lane = (pos.y - r.getY()) / rowH;
+    if (lane < 0 || lane >= groove::kMidiLanes)
+        return -1;
+    return lane;
+}
+
+void SongPage::expandOrContractBars(int index, bool expand)
+{
+    const auto& sections = engine.state().song.sections;
+    if (index < 0 || index >= (int) sections.size())
+        return;
+    const int bars = juce::jmax(1, sections[(size_t) index].bars);
+    const int next = expand ? juce::jmin(16, bars * 2) : juce::jmax(1, bars / 2);
+    if (next == bars)
+        return;
+    engine.setSongSectionBars(index, next);
+    refreshFromEngine();
+    if (onSongChanged) onSongChanged();
+}
+
 void SongPage::addPart(groove::SongPart part)
 {
     engine.addSongSection(part);
@@ -210,8 +373,10 @@ void SongPage::refreshFromEngine()
     {
         const int i = juce::jlimit(0, (int) song.sections.size() - 1, song.current);
         const auto& section = song.sections[(size_t) i];
+        partBox.setSelectedId((int) section.part + 1, juce::dontSendNotification);
         barsBox.setSelectedId(juce::jlimit(1, 16, section.bars), juce::dontSendNotification);
         meterBox.setSelectedId((int) section.meter + 1, juce::dontSendNotification);
+        meterTransformBox.setSelectedId((int) engine.state().meterTransform + 1, juce::dontSendNotification);
         for (int t = 0; t < groove::kTracks; ++t)
         {
             const auto& sh = section.shapes[(size_t) t];
@@ -220,13 +385,52 @@ void SongPage::refreshFromEngine()
             rows[(size_t) t].velocity.setValue(sh.velocity, juce::dontSendNotification);
         }
     }
+    recButton.setToggleState(engine.isRecording(), juce::dontSendNotification);
+    deleteTakeButton.setEnabled(! song.sections.empty());
+    rebuildTakeButtons();
     refreshing = false;
     repaint();
 }
 
 void SongPage::timerCallback()
 {
+    recButton.setToggleState(engine.isRecording(), juce::dontSendNotification);
+    followButton.setToggleState(engine.state().song.follow, juce::dontSendNotification);
     repaint();
+}
+
+void SongPage::rebuildTakeButtons()
+{
+    takeButtons.clear();
+    if (engine.state().song.sections.empty())
+        return;
+    const int i = juce::jlimit(0, (int) engine.state().song.sections.size() - 1,
+                               engine.state().song.current);
+    const auto& section = engine.state().song.sections[(size_t) i];
+    for (int t = 0; t < (int) section.takes.size(); ++t)
+    {
+        auto* b = takeButtons.add(new juce::TextButton(section.takes[(size_t) t].label));
+        b->setClickingTogglesState(true);
+        b->setRadioGroupId(77);
+        b->setToggleState(section.currentTake == t, juce::dontSendNotification);
+        b->onClick = [this, t]
+        {
+            engine.restoreTake(t);
+            refreshFromEngine();
+            if (onSongChanged) onSongChanged();
+        };
+        addAndMakeVisible(b);
+    }
+    resized();
+}
+
+int SongPage::sectionIndexAt(juce::Point<int> pos) const
+{
+    const auto& sections = engine.state().song.sections;
+    for (int i = 0; i < (int) sections.size(); ++i)
+        if (sectionTile(i).contains(pos))
+            return i;
+    return -1;
 }
 
 juce::Rectangle<int> SongPage::sectionTile(int index) const
@@ -266,24 +470,42 @@ int SongPage::insertIndexForX(int x) const
 void SongPage::resized()
 {
     auto bounds = getLocalBounds().reduced(16, 12);
-    editPanel = bounds.removeFromBottom(268);
-    bounds.removeFromBottom(10);
+    editPanel = bounds.removeFromBottom(220);
+    bounds.removeFromBottom(8);
+    lanesPanel = bounds.removeFromBottom(132);
+    bounds.removeFromBottom(8);
     arrangePanel = bounds;
 
     auto er = editPanel.reduced(16, 0);
-    er.removeFromTop(38);
+    auto title = er.removeFromTop(38);
+    recButton.setBounds(title.removeFromRight(64).reduced(0, 4));
+    title.removeFromRight(8);
+    deleteTakeButton.setBounds(title.removeFromRight(96).reduced(0, 4));
+    title.removeFromRight(8);
+    keepTakeButton.setBounds(title.removeFromRight(92).reduced(0, 4));
     auto tools = er.removeFromTop(32);
-    followButton.setBounds(tools.removeFromLeft(130));
-    tools.removeFromLeft(12);
-    barsBox.setBounds(tools.removeFromLeft(110));
+    followButton.setBounds(tools.removeFromLeft(118));
+    tools.removeFromLeft(8);
+    partBox.setBounds(tools.removeFromLeft(104));
+    tools.removeFromLeft(8);
+    barMinus.setBounds(tools.removeFromLeft(28).reduced(1, 2));
+    barsBox.setBounds(tools.removeFromLeft(88));
+    barPlus.setBounds(tools.removeFromLeft(28).reduced(1, 2));
     tools.removeFromLeft(8);
     meterBox.setBounds(tools.removeFromLeft(72));
+    tools.removeFromLeft(8);
+    meterTransformBox.setBounds(tools.removeFromLeft(82));
     tools.removeFromLeft(8);
     duplicateButton.setBounds(tools.removeFromLeft(110));
     tools.removeFromLeft(8);
     deleteButton.setBounds(tools.removeFromLeft(90));
 
-    er.removeFromTop(22);
+    auto takeRow = er.removeFromTop(28);
+    const int takeW = juce::jmax(36, juce::jmin(72, takeRow.getWidth() / juce::jmax(1, takeButtons.size())));
+    for (auto* b : takeButtons)
+        b->setBounds(takeRow.removeFromLeft(takeW).reduced(2, 2));
+
+    er.removeFromTop(18);
     const int rowH = juce::jmax(22, er.getHeight() / groove::kTracks);
     const int nameW = 58;
     const int comboW = juce::jmax(54, (er.getWidth() - nameW - 180) / 4);
@@ -311,6 +533,15 @@ void SongPage::resized()
     bridgeButton.setBounds(top.removeFromLeft(bw).reduced(3, 0));
     fillButton.setBounds(top.removeFromLeft(bw).reduced(3, 0));
     outroButton.setBounds(top.removeFromLeft(bw).reduced(3, 0));
+
+    auto laneBody = lanesPanel.reduced(16, 0);
+    laneBody.removeFromTop(34);
+    const int laneH = juce::jmax(18, laneBody.getHeight() / groove::kMidiLanes);
+    for (int i = 0; i < groove::kMidiLanes; ++i)
+    {
+        laneHits[(size_t) i].setBounds(laneBody.removeFromTop(laneH).reduced(0, 1));
+        laneHits[(size_t) i].toFront(false);
+    }
 }
 
 void SongPage::mouseDown(const juce::MouseEvent& e)
@@ -318,24 +549,83 @@ void SongPage::mouseDown(const juce::MouseEvent& e)
     dragging = false;
     dragFrom = -1;
     dragInsert = -1;
+    resizeIndex = -1;
+
+    const int lane = midiLaneAt(e.getPosition());
+    if (lane >= 0)
+    {
+        const int ch = groove::midiLaneChannel(lane);
+        auto label = lanesPanel.reduced(16, 0);
+        label.removeFromTop(34);
+        const bool openUi = e.x < label.getX() + kLaneLabelW;
+        if (onChannelClicked)
+            onChannelClicked(ch);
+        if (openUi && onInstrumentUiClicked)
+            onInstrumentUiClicked(ch);
+        return;
+    }
+
     const auto& sections = engine.state().song.sections;
     for (int i = 0; i < (int) sections.size(); ++i)
     {
         const auto tile = sectionTile(i);
-        if (tile.contains(e.getPosition()))
+        if (! tile.contains(e.getPosition()))
+            continue;
+
+        if (sectionDeleteArea(i).contains(e.getPosition()))
         {
-            dragFrom = i;
-            dragOffset = e.getPosition() - tile.getPosition();
-            engine.selectSongSection(i);
+            engine.removeSongSection(i);
             refreshFromEngine();
             if (onSongChanged) onSongChanged();
             return;
         }
+        if (sectionNameArea(i).contains(e.getPosition()) && ! e.mods.isShiftDown())
+        {
+            engine.selectSongSection(i);
+            refreshFromEngine();
+            if (onSongChanged) onSongChanged();
+            showPartMenu(i, e.getScreenPosition());
+            return;
+        }
+        if (sectionResizeHandle(i).contains(e.getPosition()) && ! e.mods.isShiftDown())
+        {
+            resizeIndex = i;
+            resizeStartBars = juce::jmax(1, sections[(size_t) i].bars);
+            resizeTileLeft = tile.getX();
+            resizePxPerBar = (float) tile.getWidth() / (float) resizeStartBars;
+            if (resizePxPerBar < 8.0f)
+                resizePxPerBar = 8.0f;
+            return;
+        }
+        engine.selectSongSection(i, e.mods.isShiftDown());
+        refreshFromEngine();
+        if (onSongChanged) onSongChanged();
+        if (e.mods.isShiftDown())
+            return;
+        dragFrom = i;
+        dragOffset = e.getPosition() - tile.getPosition();
+        return;
     }
 }
 
 void SongPage::mouseDrag(const juce::MouseEvent& e)
 {
+    if (resizeIndex >= 0)
+    {
+        const auto& sections = engine.state().song.sections;
+        if (resizeIndex < (int) sections.size())
+        {
+            const int next = juce::jlimit(1, 16,
+                (int) std::round((float) (e.x - resizeTileLeft) / resizePxPerBar));
+            if (next != sections[(size_t) resizeIndex].bars)
+            {
+                engine.setSongSectionBars(resizeIndex, next);
+                if (onSongChanged) onSongChanged();
+            }
+        }
+        repaint();
+        return;
+    }
     if (dragFrom < 0)
         return;
     if (! dragging && e.getDistanceFromDragStart() > 6)
@@ -347,8 +637,32 @@ void SongPage::mouseDrag(const juce::MouseEvent& e)
     repaint();
 }
 
+void SongPage::mouseMove(const juce::MouseEvent& e)
+{
+    const auto& sections = engine.state().song.sections;
+    for (int i = 0; i < (int) sections.size(); ++i)
+        if (sectionResizeHandle(i).contains(e.getPosition()))
+        {
+            setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
+            return;
+        }
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+}
+
+void SongPage::mouseExit(const juce::MouseEvent&)
+{
+    setMouseCursor(juce::MouseCursor::NormalCursor);
+}
+
 void SongPage::mouseUp(const juce::MouseEvent&)
 {
+    if (resizeIndex >= 0)
+    {
+        resizeIndex = -1;
+        refreshFromEngine();
+        if (onSongChanged) onSongChanged();
+        return;
+    }
     if (dragging && dragFrom >= 0 && dragInsert >= 0)
     {
         engine.moveSongSection(dragFrom, dragInsert);
@@ -369,8 +683,12 @@ void SongPage::paintSectionTile(juce::Graphics& g, int index, juce::Rectangle<fl
 
     g.setColour(colour.withAlpha(0.42f * alpha + (selected ? 0.46f : 0.0f) * alpha));
     g.fillRoundedRectangle(tile, 6.0f);
-    g.setColour((selected ? juce::Colours::white : colour.brighter(0.2f)).withAlpha(alpha));
-    g.drawRoundedRectangle(tile, 6.0f, selected ? 2.0f : 1.0f);
+    const bool queued = (index == engine.queuedSongSection());
+    const bool beatJump = (index == engine.pendingBeatJumpSection());
+    g.setColour((selected ? juce::Colours::white
+                 : (queued || beatJump) ? juce::Colour(0xff7ac8ff)
+                 : colour.brighter(0.2f)).withAlpha(alpha));
+    g.drawRoundedRectangle(tile, 6.0f, (selected || queued || beatJump) ? 2.0f : 1.0f);
 
     if (playing)
     {
@@ -384,12 +702,41 @@ void SongPage::paintSectionTile(juce::Graphics& g, int index, juce::Rectangle<fl
     g.setColour(juce::Colour(0xff071018).withAlpha(alpha));
     g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
     auto title = inner.removeFromTop(22);
-    g.drawText(groove::songPartName(section.part), title, juce::Justification::centredLeft);
+    auto del = title.removeFromRight(16);
+    const bool canDelete = engine.state().song.sections.size() > 1;
+    g.setColour((canDelete ? juce::Colour(0xff3b1010) : juce::Colour(0xff1a2830)).withAlpha(alpha));
+    g.fillRoundedRectangle(del.toFloat().reduced(1.0f), 3.0f);
+    g.setColour((canDelete ? juce::Colour(0xffff8a8a) : juce::Colour(0xff4a5a66)).withAlpha(alpha));
+    g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+    g.drawText("X", del, juce::Justification::centred);
+    juce::String name = juce::String(groove::songPartName(section.part)) + "  ▾";
+    g.drawText(name, title, juce::Justification::centredLeft);
+    if (selected && engine.isRecording())
+    {
+        g.setColour(juce::Colour(0xffff3b3b).withAlpha(alpha));
+        g.fillEllipse(title.removeFromRight(16).reduced(3).toFloat());
+    }
     g.setFont(juce::FontOptions(12.0f, juce::Font::bold));
+    g.setColour(juce::Colour(0xff071018).withAlpha(alpha));
     g.drawText(groove::meterName(section.meter), title, juce::Justification::centredRight);
     g.setFont(juce::FontOptions(12.0f));
-    g.drawText(juce::String(section.bars) + (section.bars == 1 ? " BAR" : " BARS"),
-               inner.removeFromTop(18), juce::Justification::centredLeft);
+    juce::String meta = juce::String(section.bars) + (section.bars == 1 ? " BAR" : " BARS");
+    if (section.currentTake >= 0 && section.currentTake < (int) section.takes.size())
+        meta += "  ·  " + section.takes[(size_t) section.currentTake].label;
+    g.drawText(meta, inner.removeFromTop(16), juce::Justification::centredLeft);
+
+    const int recLane = groove::midiLaneIndexForChannel(activeMidiChannel);
+    if (selected && recLane >= 0)
+    {
+        juce::String rec = "MIDI  ·  CH" + juce::String(activeMidiChannel)
+            + "  " + juce::String(groove::midiLaneName(recLane));
+        if (engine.isRecording())
+            rec = "REC  ·  " + rec;
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.setColour((engine.isRecording() ? juce::Colour(0xff3b1010)
+                                         : juce::Colour(0xff071018)).withAlpha(alpha));
+        g.drawText(rec, inner.removeFromTop(16), juce::Justification::centredLeft);
+    }
 
     auto ticks = inner.removeFromBottom(26);
     const float tw = ticks.getWidth() / (float) groove::kTracks;
@@ -404,6 +751,103 @@ void SongPage::paintSectionTile(juce::Graphics& g, int index, juce::Rectangle<fl
                                           ticks.getBottom() - h, tw - 3.0f, h);
         g.setColour(colour.brighter(0.15f).withAlpha(0.85f * alpha));
         g.fillRoundedRectangle(bar, 1.2f);
+    }
+
+    auto grip = juce::Rectangle<float>(tile.getRight() - 12.0f, tile.getY() + 8.0f,
+                                      8.0f, juce::jmax(12.0f, tile.getHeight() - 16.0f));
+    g.setColour(juce::Colour(0xff071018).withAlpha(0.45f * alpha));
+    g.fillRoundedRectangle(grip, 3.0f);
+    g.setColour(juce::Colours::white.withAlpha(0.35f * alpha));
+    for (int k = 0; k < 2; ++k)
+        g.fillRect(grip.getX() + 2.0f + (float) k * 2.5f, grip.getY() + 6.0f, 1.2f, grip.getHeight() - 12.0f);
+    if (queued || beatJump)
+    {
+        g.setColour(juce::Colour(0xff7ac8ff).withAlpha(alpha));
+        g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
+        g.drawText(beatJump ? "BEAT" : "NEXT",
+                   tile.reduced(8, 6).removeFromBottom(16), juce::Justification::centredRight);
+    }
+}
+
+void SongPage::paintMidiLanes(juce::Graphics& g)
+{
+    auto r = lanesPanel.reduced(16, 0);
+    r.removeFromTop(34);
+    if (r.getHeight() < 20)
+        return;
+
+    const auto& song = engine.state().song;
+    const bool hasSection = ! song.sections.empty();
+    const int current = hasSection
+        ? juce::jlimit(0, (int) song.sections.size() - 1, song.current) : -1;
+    const auto& liveLanes = engine.state().midiLanes;
+    const auto* sectionLanes = (current >= 0) ? &song.sections[(size_t) current].midiLanes : nullptr;
+    const int recLane = groove::midiLaneIndexForChannel(activeMidiChannel);
+    const int rowH = juce::jmax(18, r.getHeight() / groove::kMidiLanes);
+
+    for (int lane = 0; lane < groove::kMidiLanes; ++lane)
+    {
+        auto row = r.removeFromTop(rowH).reduced(0, 1).toFloat();
+        const bool armed = (lane == recLane);
+        const bool recordingHere = armed && engine.isRecording();
+        g.setColour(recordingHere ? juce::Colour(0xff3a1820)
+                    : armed ? juce::Colour(0xff1a4a62)
+                    : juce::Colour(0xff0d1c26));
+        g.fillRoundedRectangle(row, 4.0f);
+        if (armed)
+        {
+            g.setColour(recordingHere ? juce::Colour(0xffff6a6a) : juce::Colour(0xff7ac8ff));
+            g.drawRoundedRectangle(row.reduced(0.5f), 4.0f, 1.6f);
+        }
+
+        auto label = row.removeFromLeft((float) kLaneLabelW).reduced(6.0f, 0.0f);
+        auto uiChip = label.removeFromRight(22.0f).reduced(0.0f, 4.0f);
+        g.setColour((armed ? juce::Colour(0xff2e8ec4) : juce::Colour(0xff1a3a4e)).withAlpha(0.95f));
+        g.fillRoundedRectangle(uiChip, 3.0f);
+        g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+        g.setColour(armed ? juce::Colours::white : juce::Colour(0xff8aa0ae));
+        g.drawText("UI", uiChip, juce::Justification::centred);
+        g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+        g.setColour(armed ? juce::Colour(0xffe8f6ff) : juce::Colour(0xff8aa0ae));
+        juce::String name = juce::String(groove::midiLaneName(lane))
+            + "  ·  CH" + juce::String(groove::midiLaneChannel(lane));
+        if (recordingHere)
+            name += "  ·  REC";
+        g.drawText(name, label.reduced(2.0f, 0.0f), juce::Justification::centredLeft);
+
+        const auto& srcLanes = (current >= 0 && engine.isRecording())
+            ? liveLanes
+            : (sectionLanes != nullptr ? *sectionLanes : liveLanes);
+        const auto& notes = srcLanes[(size_t) lane].notes;
+        const auto& patches = srcLanes[(size_t) lane].patches;
+        if (! patches.empty())
+        {
+            g.setColour(juce::Colour(0xffc8e8ff).withAlpha(armed ? 0.95f : 0.65f));
+            g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
+            g.drawText(patches.back().name, row.removeFromRight(90.0f).reduced(6.0f, 0.0f),
+                       juce::Justification::centredRight);
+        }
+
+        auto dots = row.reduced(6.0f, 5.0f);
+        const float stepW = dots.getWidth() / (float) groove::kSteps;
+        std::array<int, groove::kSteps> hits {};
+        for (const auto& n : notes)
+        {
+            if (n.step < 0 || n.step >= groove::kSteps)
+                continue;
+            const int span = juce::jmax(1, n.lengthSteps);
+            for (int k = 0; k < span && k < groove::kSteps; ++k)
+                hits[(size_t) ((n.step + k) % groove::kSteps)] += 1;
+        }
+        for (int s = 0; s < groove::kSteps; ++s)
+        {
+            auto d = juce::Rectangle<float>(dots.getX() + (float) s * stepW + 1.0f,
+                                            dots.getY(), stepW - 2.0f, dots.getHeight());
+            g.setColour(hits[(size_t) s] > 0
+                ? (armed ? juce::Colour(0xff7ac8ff) : juce::Colour(0xff3d6a80))
+                : juce::Colour(0xff152430));
+            g.fillRoundedRectangle(d, 1.2f);
+        }
     }
 }
 
@@ -425,8 +869,20 @@ void SongPage::paint(juce::Graphics& g)
         g.drawText(title, header.reduced(12, 0), juce::Justification::centredLeft);
     };
 
-    panel(g, arrangePanel, "ARRANGEMENT  ·  DRAG TO REORDER  ·  CLICK TO EDIT");
+    juce::String arrangeTitle = "ARRANGEMENT  ·  CLICK TO CUE  ·  SHIFT-CLICK JUMPS ON BEAT";
+    panel(g, arrangePanel, arrangeTitle);
+    const int recLane = groove::midiLaneIndexForChannel(activeMidiChannel);
+    juce::String lanesTitle = "MIDI LANES";
+    if (recLane >= 0)
+    {
+        lanesTitle += "  ·  CH" + juce::String(activeMidiChannel)
+            + "  " + juce::String(groove::midiLaneName(recLane));
+        if (engine.isRecording())
+            lanesTitle += "  ·  RECORDING";
+    }
+    panel(g, lanesPanel, lanesTitle);
     panel(g, editPanel, "SECTION");
+    paintMidiLanes(g);
 
     const auto& song = engine.state().song;
     const int current = song.sections.empty() ? -1
@@ -434,8 +890,9 @@ void SongPage::paint(juce::Graphics& g)
 
     for (int i = 0; i < (int) song.sections.size(); ++i)
     {
-        const bool selected = (i == current);
-        const bool playing = selected && engine.isPlaying() && song.follow;
+        const bool selected = (i == current) || (i == engine.queuedSongSection())
+            || (i == engine.pendingBeatJumpSection());
+        const bool playing = (i == current) && engine.isPlaying();
         const float alpha = (dragging && i == dragFrom) ? 0.28f : 1.0f;
         paintSectionTile(g, i, sectionTile(i).toFloat(), selected, playing, alpha);
     }
@@ -462,7 +919,7 @@ void SongPage::paint(juce::Graphics& g)
     }
 
     auto col = editPanel.reduced(16, 0);
-    col.removeFromTop(70);
+    col.removeFromTop(98);
     auto head = col.removeFromTop(22);
     head.removeFromLeft(58);
     const int comboW = juce::jmax(54, (head.getWidth() - 180) / 4);
@@ -487,7 +944,24 @@ void SongPage::paint(juce::Graphics& g)
         else if (song.follow)
             status += "  ·  PLAY walks the arrangement";
         else
-            status += "  ·  FOLLOW off";
+            status += "  ·  stays here until you cue another";
+        const int queued = engine.queuedSongSection();
+        if (queued >= 0 && queued < (int) song.sections.size())
+            status += "  ·  NEXT "
+                + juce::String(groove::songPartName(song.sections[(size_t) queued].part));
+        const int beatJump = engine.pendingBeatJumpSection();
+        if (beatJump >= 0 && beatJump < (int) song.sections.size())
+            status += "  ·  ON BEAT "
+                + juce::String(groove::songPartName(song.sections[(size_t) beatJump].part));
+        if (engine.isRecording())
+        {
+            const int recLane = groove::midiLaneIndexForChannel(activeMidiChannel);
+            status = juce::String(groove::songPartName(section.part)) + "  ·  REC  ·  CH"
+                + juce::String(activeMidiChannel);
+            if (recLane >= 0)
+                status += "  " + juce::String(groove::midiLaneName(recLane));
+        }
     }
-    g.drawText(status, editPanel.removeFromTop(34).reduced(88, 0), juce::Justification::centredRight);
+    g.drawText(status, editPanel.removeFromTop(34).reduced(88, 0).withTrimmedRight(280),
+               juce::Justification::centredLeft);
 }

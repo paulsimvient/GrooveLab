@@ -18,6 +18,269 @@ static VoiceParams defaultsFor(int i)
     }
 }
 
+juce::var stepToVar(const Step& st)
+{
+    auto* so = new juce::DynamicObject();
+    so->setProperty("active", st.active);
+    so->setProperty("overrideMode", (int) st.overrideMode);
+    so->setProperty("velocity", st.velocity);
+    so->setProperty("probability", st.probability);
+    so->setProperty("ratchet", st.ratchet);
+    so->setProperty("role", (int) st.role);
+    if (st.midiNote.has_value())
+        so->setProperty("midiNote", *st.midiNote);
+    auto* lo = new juce::DynamicObject();
+    for (int pi = 0; pi < paramCount; ++pi)
+        if (st.locks[(size_t) pi].has_value())
+            lo->setProperty(paramName((Param) pi), *st.locks[(size_t) pi]);
+    so->setProperty("locks", juce::var(lo));
+    return juce::var(so);
+}
+
+juce::Array<juce::var> stepsToVar(const std::array<Step, kSteps>& steps)
+{
+    juce::Array<juce::var> stepArray;
+    for (int s = 0; s < kSteps; ++s)
+        stepArray.add(stepToVar(steps[(size_t) s]));
+    return stepArray;
+}
+
+void stepFromVar(Step& st, juce::DynamicObject* so, bool migrateActive)
+{
+    if (so == nullptr) return;
+    st.active = (bool) so->getProperty("active");
+    auto overrideVar = so->getProperty("overrideMode");
+    if (! overrideVar.isVoid())
+        st.overrideMode = (StepOverrideMode) juce::jlimit(0, 2, (int) overrideVar);
+    else if (migrateActive && st.active)
+        st.overrideMode = StepOverrideMode::forceOn;
+    st.velocity = (float) so->getProperty("velocity");
+    st.probability = (float) so->getProperty("probability");
+    st.ratchet = juce::jmax(1, (int) so->getProperty("ratchet"));
+    st.role = (StepRole) juce::jlimit(0, 3, (int) so->getProperty("role"));
+    auto noteVar = so->getProperty("midiNote");
+    if (! noteVar.isVoid() && isValidMidiNote((int) noteVar))
+        st.midiNote = (int) noteVar;
+    else
+        st.midiNote.reset();
+    auto* lo = so->getProperty("locks").getDynamicObject();
+    if (lo != nullptr)
+    {
+        for (int pi = 0; pi < paramCount; ++pi)
+        {
+            auto value = lo->getProperty(paramName((Param) pi));
+            if (! value.isVoid())
+                st.locks[(size_t) pi] = (float) value;
+        }
+    }
+}
+
+void stepsFromVar(std::array<Step, kSteps>& steps, const juce::var& stepsVar, bool migrateActive)
+{
+    if (! stepsVar.isArray()) return;
+    const int n = juce::jmin(kSteps, stepsVar.size());
+    for (int s = 0; s < n; ++s)
+        stepFromVar(steps[(size_t) s], stepsVar[s].getDynamicObject(), migrateActive);
+}
+
+juce::var shapeToVar(const TrackShape& sh)
+{
+    auto* sho = new juce::DynamicObject();
+    sho->setProperty("generatorSteps", sh.generatorSteps);
+    sho->setProperty("pulses", sh.pulses);
+    sho->setProperty("rotate", sh.rotate);
+    sho->setProperty("division", sh.division);
+    sho->setProperty("probability", sh.probability);
+    sho->setProperty("velocity", sh.velocity);
+    return juce::var(sho);
+}
+
+void shapeFromVar(TrackShape& sh, juce::DynamicObject* sho)
+{
+    if (sho == nullptr) return;
+    auto readI = [sho](const char* k, int fb)
+    {
+        auto v = sho->getProperty(k);
+        return v.isVoid() ? fb : (int) v;
+    };
+    auto readF = [sho](const char* k, float fb)
+    {
+        auto v = sho->getProperty(k);
+        return v.isVoid() ? fb : (float) v;
+    };
+    sh.generatorSteps = juce::jlimit(1, kSteps, readI("generatorSteps", sh.generatorSteps));
+    sh.pulses = juce::jlimit(0, sh.generatorSteps, readI("pulses", sh.pulses));
+    sh.rotate = readI("rotate", sh.rotate);
+    sh.division = readF("division", sh.division);
+    sh.probability = juce::jlimit(0.0f, 1.0f, readF("probability", sh.probability));
+    sh.velocity = juce::jlimit(0.0f, 1.2f, readF("velocity", sh.velocity));
+}
+
+juce::var lanesToVar(const std::array<MidiLane, kMidiLanes>& lanes)
+{
+    juce::Array<juce::var> arr;
+    for (int i = 0; i < kMidiLanes; ++i)
+    {
+        const auto& lane = lanes[(size_t) i];
+        auto* o = new juce::DynamicObject();
+        o->setProperty("channel", lane.channel);
+        o->setProperty("name", lane.name);
+        juce::Array<juce::var> notes;
+        for (const auto& n : lane.notes)
+        {
+            auto* no = new juce::DynamicObject();
+            no->setProperty("step", n.step);
+            no->setProperty("note", n.note);
+            no->setProperty("vel", n.velocity);
+            no->setProperty("len", juce::jmax(1, n.lengthSteps));
+            notes.add(juce::var(no));
+        }
+        o->setProperty("notes", notes);
+        juce::Array<juce::var> patches;
+        for (const auto& p : lane.patches)
+        {
+            auto* po = new juce::DynamicObject();
+            po->setProperty("step", p.step);
+            po->setProperty("name", p.name);
+            po->setProperty("kit", p.kitIndex);
+            patches.add(juce::var(po));
+        }
+        o->setProperty("patches", patches);
+        juce::Array<juce::var> ccs;
+        for (const auto& c : lane.ccs)
+        {
+            auto* co = new juce::DynamicObject();
+            co->setProperty("step", c.step);
+            co->setProperty("cc", c.number);
+            co->setProperty("val", c.value);
+            ccs.add(juce::var(co));
+        }
+        o->setProperty("ccs", ccs);
+        juce::Array<juce::var> extras;
+        for (const auto& e : lane.extras)
+        {
+            auto* eo = new juce::DynamicObject();
+            eo->setProperty("step", e.step);
+            eo->setProperty("type", e.type);
+            eo->setProperty("d1", e.data1);
+            eo->setProperty("d2", e.data2);
+            extras.add(juce::var(eo));
+        }
+        o->setProperty("extras", extras);
+        arr.add(juce::var(o));
+    }
+    return juce::var(arr);
+}
+
+void lanesFromVar(std::array<MidiLane, kMidiLanes>& lanes, const juce::var& v)
+{
+    lanes = makeDefaultMidiLanes();
+    if (! v.isArray())
+        return;
+    for (int i = 0; i < juce::jmin(kMidiLanes, v.size()); ++i)
+    {
+        auto* o = v[i].getDynamicObject();
+        if (o == nullptr)
+            continue;
+        auto& lane = lanes[(size_t) i];
+        if (! o->getProperty("channel").isVoid())
+            lane.channel = juce::jlimit(1, 16, (int) o->getProperty("channel"));
+        if (o->getProperty("name").toString().isNotEmpty())
+            lane.name = o->getProperty("name").toString();
+        if (auto* notes = o->getProperty("notes").getArray())
+        {
+            for (const auto& item : *notes)
+            {
+                auto* no = item.getDynamicObject();
+                if (no == nullptr) continue;
+                MidiLaneNote n;
+                n.step = juce::jlimit(0, kSteps - 1, (int) no->getProperty("step"));
+                n.note = juce::jlimit(0, 127, (int) no->getProperty("note"));
+                n.velocity = juce::jlimit(0.05f, 1.2f, (float) no->getProperty("vel"));
+                n.lengthSteps = juce::jmax(1, no->getProperty("len").isVoid()
+                    ? 1 : (int) no->getProperty("len"));
+                lane.notes.push_back(n);
+            }
+        }
+        if (auto* patches = o->getProperty("patches").getArray())
+        {
+            for (const auto& item : *patches)
+            {
+                auto* po = item.getDynamicObject();
+                if (po == nullptr) continue;
+                MidiLanePatch p;
+                p.step = juce::jlimit(0, kSteps - 1, (int) po->getProperty("step"));
+                p.name = po->getProperty("name").toString();
+                p.kitIndex = juce::jmax(0, (int) po->getProperty("kit"));
+                lane.patches.push_back(p);
+            }
+        }
+        if (auto* ccs = o->getProperty("ccs").getArray())
+        {
+            for (const auto& item : *ccs)
+            {
+                auto* co = item.getDynamicObject();
+                if (co == nullptr) continue;
+                MidiLaneCc c;
+                c.step = juce::jlimit(0, kSteps - 1, (int) co->getProperty("step"));
+                c.number = juce::jlimit(0, 127, (int) co->getProperty("cc"));
+                c.value = juce::jlimit(0, 127, (int) co->getProperty("val"));
+                lane.ccs.push_back(c);
+            }
+        }
+        if (auto* extras = o->getProperty("extras").getArray())
+        {
+            for (const auto& item : *extras)
+            {
+                auto* eo = item.getDynamicObject();
+                if (eo == nullptr) continue;
+                MidiLaneExtra e;
+                e.step = juce::jlimit(0, kSteps - 1, (int) eo->getProperty("step"));
+                e.type = juce::jlimit(0, 4, (int) eo->getProperty("type"));
+                e.data1 = (int) eo->getProperty("d1");
+                e.data2 = (int) eo->getProperty("d2");
+                if (e.type > 0)
+                    lane.extras.push_back(e);
+            }
+        }
+    }
+}
+
+juce::var takeToVar(const PatternTake& take)
+{
+    auto* to = new juce::DynamicObject();
+    to->setProperty("label", take.label);
+    juce::Array<juce::var> shapes;
+    juce::Array<juce::var> tracksSteps;
+    for (int t = 0; t < kTracks; ++t)
+    {
+        shapes.add(shapeToVar(take.shapes[(size_t) t]));
+        tracksSteps.add(stepsToVar(take.steps[(size_t) t]));
+    }
+    to->setProperty("shapes", shapes);
+    to->setProperty("steps", tracksSteps);
+    to->setProperty("midiLanes", lanesToVar(take.midiLanes));
+    return juce::var(to);
+}
+
+PatternTake takeFromVar(const juce::var& v)
+{
+    PatternTake take;
+    auto* to = v.getDynamicObject();
+    if (to == nullptr) return take;
+    take.label = to->getProperty("label").toString();
+    auto shapesVar = to->getProperty("shapes");
+    auto stepsVar = to->getProperty("steps");
+    if (shapesVar.isArray())
+        for (int t = 0; t < juce::jmin(kTracks, shapesVar.size()); ++t)
+            shapeFromVar(take.shapes[(size_t) t], shapesVar[t].getDynamicObject());
+    if (stepsVar.isArray())
+        for (int t = 0; t < juce::jmin(kTracks, stepsVar.size()); ++t)
+            stepsFromVar(take.steps[(size_t) t], stepsVar[t], false);
+    lanesFromVar(take.midiLanes, to->getProperty("midiLanes"));
+    return take;
+}
+
 GrooveState::GrooveState()
 {
     // Musical starting point is generator data, not a hard-coded step pattern.
@@ -57,9 +320,9 @@ VoiceParams GrooveState::effectiveParams(int t, int s) const
 int GrooveState::effectiveMidiNote(int t, int s) const
 {
     const auto& st = tracks[t].steps[s];
-    if (st.midiNote.has_value() && isUjamKitNote(*st.midiNote))
+    if (st.midiNote.has_value() && isValidMidiNote(*st.midiNote))
         return *st.midiNote;
-    if (isUjamKitNote(tracks[t].midiNote))
+    if (isValidMidiNote(tracks[t].midiNote))
         return tracks[t].midiNote;
     return midiNoteForTrack(t);
 }
@@ -81,7 +344,7 @@ bool GrooveState::trackIsAudible(int track) const
 void GrooveState::seedDefaultSong()
 {
     song = {};
-    song.follow = true;
+    song.follow = false;
     song.current = 0;
 
     auto make = [this](SongPart part, int bars)
@@ -90,8 +353,7 @@ void GrooveState::seedDefaultSong()
         section.part = part;
         section.bars = bars;
         section.meter = meter;
-        for (int t = 0; t < kTracks; ++t)
-            section.shapes[(size_t) t] = TrackShape::fromTrack(tracks[t]);
+        copyPatternFromTracks(section, tracks);
         return section;
     };
 
@@ -116,17 +378,8 @@ void GrooveState::applySongSection(int index)
         return;
     song.current = juce::jlimit(0, (int) song.sections.size() - 1, index);
     const auto& section = song.sections[(size_t) song.current];
-    for (int t = 0; t < kTracks; ++t)
-    {
-        auto& tr = tracks[t];
-        const auto& sh = section.shapes[(size_t) t];
-        tr.generatorSteps = juce::jlimit(1, kSteps, sh.generatorSteps);
-        tr.pulses = juce::jlimit(0, tr.generatorSteps, sh.pulses);
-        tr.rotate = sh.rotate;
-        tr.division = sh.division;
-        tr.probability = juce::jlimit(0.0f, 1.0f, sh.probability);
-        tr.velocity = juce::jlimit(0.0f, 1.2f, sh.velocity);
-    }
+    applyPatternToTracks(section, tracks);
+    midiLanes = section.midiLanes;
     meter = section.meter;
 }
 
@@ -136,8 +389,9 @@ void GrooveState::captureLiveToCurrentSection()
         return;
     song.current = juce::jlimit(0, (int) song.sections.size() - 1, song.current);
     auto& section = song.sections[(size_t) song.current];
-    for (int t = 0; t < kTracks; ++t)
-        section.shapes[(size_t) t] = TrackShape::fromTrack(tracks[t]);
+    section.meter = meter;
+    copyPatternFromTracks(section, tracks);
+    section.midiLanes = midiLanes;
 }
 
 void GrooveState::setLock(int t, int s, Param p, float v) { tracks[t].steps[s].locks[(int)p] = v; }
@@ -152,14 +406,47 @@ void GrooveState::clearAllLocks(int t, int s)
 juce::var GrooveState::toVar() const
 {
     auto* root = new juce::DynamicObject();
-    root->setProperty("formatVersion", 9);
+    root->setProperty("formatVersion", 11);
     root->setProperty("name", name);
     root->setProperty("lastPluginPath", lastPluginPath);
     root->setProperty("lastPluginProgram", lastPluginProgram);
     root->setProperty("lastPluginPatch", lastPluginPatch);
+    root->setProperty("lastSynthPluginPath", lastSynthPluginPath);
+    root->setProperty("lastSynthPatch", lastSynthPatch);
+    root->setProperty("lastSynthOctave", lastSynthOctave);
+    root->setProperty("lastKeyboardTarget", lastKeyboardTarget);
+    root->setProperty("keysPlugin", keysPlugin);
+    root->setProperty("lastKeysPluginPath", lastKeysPluginPath);
+    root->setProperty("lastPolymaxPluginPath", lastPolymaxPluginPath);
+    root->setProperty("lastElectraPatch", lastElectraPatch);
+    root->setProperty("lastPolymaxPatch", lastPolymaxPatch);
+    {
+        auto* m = new juce::DynamicObject();
+        m->setProperty("drumVol", mix.drumVol);
+        m->setProperty("drumLeft", mix.drumLeft);
+        m->setProperty("drumRight", mix.drumRight);
+        m->setProperty("synthVol", mix.synthVol);
+        m->setProperty("synthLeft", mix.synthLeft);
+        m->setProperty("synthRight", mix.synthRight);
+        m->setProperty("keysVol", mix.keysVol);
+        m->setProperty("keysLeft", mix.keysLeft);
+        m->setProperty("keysRight", mix.keysRight);
+        m->setProperty("polyVol", mix.polyVol);
+        m->setProperty("polyLeft", mix.polyLeft);
+        m->setProperty("polyRight", mix.polyRight);
+        m->setProperty("busComp", mix.busComp);
+        m->setProperty("busDelay", mix.busDelay);
+        m->setProperty("masterVol", mix.masterVol);
+        juce::Array<juce::var> eq;
+        for (int i = 0; i < kEqBands; ++i)
+            eq.add(mix.eqGainDb[(size_t) i]);
+        m->setProperty("eq", eq);
+        root->setProperty("mix", juce::var(m));
+    }
     root->setProperty("soundMode", soundMode);
     root->setProperty("bpm", bpm);
     root->setProperty("meter", (int) meter);
+    root->setProperty("meterTransform", (int) meterTransform);
     root->setProperty("selectedTrack", selectedTrack);
     root->setProperty("selectedStep", selectedStep);
     root->setProperty("similarity", similarity);
@@ -193,29 +480,7 @@ juce::var GrooveState::toVar() const
         tr->setProperty("muted", track.muted);
         tr->setProperty("soloed", track.soloed);
         tr->setProperty("midiNote", track.midiNote);
-
-        juce::Array<juce::var> stepArray;
-        for (int s = 0; s < kSteps; ++s)
-        {
-            const auto& st = track.steps[s];
-            auto* so = new juce::DynamicObject();
-            so->setProperty("active", st.active);
-            so->setProperty("overrideMode", (int)st.overrideMode);
-            so->setProperty("velocity", st.velocity);
-            so->setProperty("probability", st.probability);
-            so->setProperty("ratchet", st.ratchet);
-            so->setProperty("role", (int)st.role);
-            if (st.midiNote.has_value())
-                so->setProperty("midiNote", *st.midiNote);
-
-            auto* lo = new juce::DynamicObject();
-            for (int pi = 0; pi < paramCount; ++pi)
-                if (st.locks[pi].has_value())
-                    lo->setProperty(paramName((Param)pi), *st.locks[pi]);
-            so->setProperty("locks", juce::var(lo));
-            stepArray.add(juce::var(so));
-        }
-        tr->setProperty("steps", stepArray);
+        tr->setProperty("steps", stepsToVar(track.steps));
         trackArray.add(juce::var(tr));
     }
 
@@ -231,20 +496,21 @@ juce::var GrooveState::toVar() const
         so->setProperty("part", (int) section.part);
         so->setProperty("bars", section.bars);
         so->setProperty("meter", (int) section.meter);
+        so->setProperty("currentTake", section.currentTake);
         juce::Array<juce::var> shapes;
+        juce::Array<juce::var> sectionSteps;
         for (int t = 0; t < kTracks; ++t)
         {
-            const auto& sh = section.shapes[(size_t) t];
-            auto* sho = new juce::DynamicObject();
-            sho->setProperty("generatorSteps", sh.generatorSteps);
-            sho->setProperty("pulses", sh.pulses);
-            sho->setProperty("rotate", sh.rotate);
-            sho->setProperty("division", sh.division);
-            sho->setProperty("probability", sh.probability);
-            sho->setProperty("velocity", sh.velocity);
-            shapes.add(juce::var(sho));
+            shapes.add(shapeToVar(section.shapes[(size_t) t]));
+            sectionSteps.add(stepsToVar(section.steps[(size_t) t]));
         }
         so->setProperty("shapes", shapes);
+        so->setProperty("steps", sectionSteps);
+        so->setProperty("midiLanes", lanesToVar(section.midiLanes));
+        juce::Array<juce::var> takes;
+        for (const auto& take : section.takes)
+            takes.add(takeToVar(take));
+        so->setProperty("takes", takes);
         sectionArray.add(juce::var(so));
     }
     songObj->setProperty("sections", sectionArray);
@@ -265,6 +531,9 @@ bool GrooveState::fromVar(const juce::var& v)
     auto meterVar = root->getProperty("meter");
     if (!meterVar.isVoid())
         meter = (Meter) juce::jlimit(0, kMeterCount - 1, (int) meterVar);
+    auto transformVar = root->getProperty("meterTransform");
+    if (! transformVar.isVoid())
+        meterTransform = (MeterTransform) juce::jlimit(0, kMeterTransformCount - 1, (int) transformVar);
     auto nameVar = root->getProperty("name");
     if (!nameVar.isVoid() && nameVar.toString().isNotEmpty())
         name = nameVar.toString();
@@ -274,6 +543,57 @@ bool GrooveState::fromVar(const juce::var& v)
     if (!programVar.isVoid()) lastPluginProgram = (int) programVar;
     auto patchVar = root->getProperty("lastPluginPatch");
     if (!patchVar.isVoid()) lastPluginPatch = patchVar.toString();
+    auto synthVar = root->getProperty("lastSynthPluginPath");
+    if (! synthVar.isVoid()) lastSynthPluginPath = synthVar.toString();
+    auto synthPatchVar = root->getProperty("lastSynthPatch");
+    if (! synthPatchVar.isVoid()) lastSynthPatch = synthPatchVar.toString();
+    auto synthOctVar = root->getProperty("lastSynthOctave");
+    if (! synthOctVar.isVoid())
+    {
+        const int oct = (int) synthOctVar;
+        lastSynthOctave = (oct < -3 || oct > 3) ? 0 : oct;
+    }
+    auto kbTargetVar = root->getProperty("lastKeyboardTarget");
+    if (! kbTargetVar.isVoid())
+        lastKeyboardTarget = juce::jlimit(0, 3, (int) kbTargetVar);
+    auto keysPluginVar = root->getProperty("keysPlugin");
+    if (! keysPluginVar.isVoid())
+        keysPlugin = juce::jlimit(0, 1, (int) keysPluginVar);
+    auto keysPathVar = root->getProperty("lastKeysPluginPath");
+    if (! keysPathVar.isVoid()) lastKeysPluginPath = keysPathVar.toString();
+    auto polyPathVar = root->getProperty("lastPolymaxPluginPath");
+    if (! polyPathVar.isVoid()) lastPolymaxPluginPath = polyPathVar.toString();
+    auto electraVar = root->getProperty("lastElectraPatch");
+    if (! electraVar.isVoid()) lastElectraPatch = electraVar.toString();
+    auto polymaxVar = root->getProperty("lastPolymaxPatch");
+    if (! polymaxVar.isVoid()) lastPolymaxPatch = polymaxVar.toString();
+    if (auto* m = root->getProperty("mix").getDynamicObject())
+    {
+        auto take = [](const juce::var& v, float fallback, float lo, float hi)
+        {
+            return v.isVoid() ? fallback : juce::jlimit(lo, hi, (float) v);
+        };
+        mix.drumVol = take(m->getProperty("drumVol"), 1.0f, 0.0f, 1.5f);
+        mix.drumLeft = take(m->getProperty("drumLeft"), 1.0f, 0.0f, 1.5f);
+        mix.drumRight = take(m->getProperty("drumRight"), 1.0f, 0.0f, 1.5f);
+        mix.synthVol = take(m->getProperty("synthVol"), 1.0f, 0.0f, 1.5f);
+        mix.synthLeft = take(m->getProperty("synthLeft"), 1.0f, 0.0f, 1.5f);
+        mix.synthRight = take(m->getProperty("synthRight"), 1.0f, 0.0f, 1.5f);
+        mix.keysVol = take(m->getProperty("keysVol"), 1.0f, 0.0f, 1.5f);
+        mix.keysLeft = take(m->getProperty("keysLeft"), 1.0f, 0.0f, 1.5f);
+        mix.keysRight = take(m->getProperty("keysRight"), 1.0f, 0.0f, 1.5f);
+        mix.polyVol = take(m->getProperty("polyVol"), 1.0f, 0.0f, 1.5f);
+        mix.polyLeft = take(m->getProperty("polyLeft"), 1.0f, 0.0f, 1.5f);
+        mix.polyRight = take(m->getProperty("polyRight"), 1.0f, 0.0f, 1.5f);
+        mix.busComp = take(m->getProperty("busComp"), 0.22f, 0.0f, 1.0f);
+        mix.busDelay = take(m->getProperty("busDelay"), 0.0f, 0.0f, 1.0f);
+        mix.masterVol = take(m->getProperty("masterVol"), 1.0f, 0.0f, 1.5f);
+        if (auto* eq = m->getProperty("eq").getArray())
+        {
+            for (int i = 0; i < juce::jmin(kEqBands, eq->size()); ++i)
+                mix.eqGainDb[(size_t) i] = juce::jlimit(-12.0f, 12.0f, (float) eq->getUnchecked(i));
+        }
+    }
     auto modeVar = root->getProperty("soundMode");
     if (!modeVar.isVoid()) soundMode = juce::jlimit(1, 3, (int) modeVar);
     selectedTrack = juce::jlimit(0, kTracks - 1, (int)root->getProperty("selectedTrack"));
@@ -340,7 +660,7 @@ bool GrooveState::fromVar(const juce::var& v)
         if (!mutedVar.isVoid()) track.muted = (bool) mutedVar;
         if (!soloVar.isVoid()) track.soloed = (bool) soloVar;
         auto trackNote = tr->getProperty("midiNote");
-        if (!trackNote.isVoid() && isUjamKitNote((int) trackNote))
+        if (!trackNote.isVoid() && isValidMidiNote((int) trackNote))
             track.midiNote = (int) trackNote;
         else
             track.midiNote = midiNoteForTrack(t);
@@ -370,7 +690,7 @@ bool GrooveState::fromVar(const juce::var& v)
             if (!rat.isVoid()) st.ratchet = juce::jlimit(1,4,(int)rat);
             if (!role.isVoid()) st.role = (StepRole)juce::jlimit(0,3,(int)role);
             auto midi = so->getProperty("midiNote");
-            if (!midi.isVoid() && isUjamKitNote((int) midi))
+            if (!midi.isVoid() && isValidMidiNote((int) midi))
                 st.midiNote = (int) midi;
             else
                 st.midiNote.reset();
@@ -416,32 +736,37 @@ bool GrooveState::fromVar(const juce::var& v)
                 section.meter = meter;
             auto shapesVar = so->getProperty("shapes");
             for (int t = 0; t < kTracks; ++t)
+            {
                 section.shapes[(size_t) t] = TrackShape::fromTrack(tracks[t]);
+                section.steps[(size_t) t] = tracks[t].steps;
+            }
             if (shapesVar.isArray())
             {
                 for (int t = 0; t < juce::jmin(kTracks, shapesVar.size()); ++t)
+                    shapeFromVar(section.shapes[(size_t) t], shapesVar[t].getDynamicObject());
+            }
+            auto sectionStepsVar = so->getProperty("steps");
+            if (sectionStepsVar.isArray())
+            {
+                for (int t = 0; t < juce::jmin(kTracks, sectionStepsVar.size()); ++t)
+                    stepsFromVar(section.steps[(size_t) t], sectionStepsVar[t], formatVersion < 9);
+            }
+            lanesFromVar(section.midiLanes, so->getProperty("midiLanes"));
+            auto takeVar = so->getProperty("currentTake");
+            if (! takeVar.isVoid())
+                section.currentTake = (int) takeVar;
+            auto takesVar = so->getProperty("takes");
+            if (takesVar.isArray())
+            {
+                for (const auto& takeItem : *takesVar.getArray())
                 {
-                    auto* sho = shapesVar[t].getDynamicObject();
-                    if (sho == nullptr) continue;
-                    auto& sh = section.shapes[(size_t) t];
-                    auto readI = [sho](const char* k, int fb)
-                    {
-                        auto v = sho->getProperty(k);
-                        return v.isVoid() ? fb : (int) v;
-                    };
-                    auto readF = [sho](const char* k, float fb)
-                    {
-                        auto v = sho->getProperty(k);
-                        return v.isVoid() ? fb : (float) v;
-                    };
-                    sh.generatorSteps = juce::jlimit(1, kSteps, readI("generatorSteps", sh.generatorSteps));
-                    sh.pulses = juce::jlimit(0, sh.generatorSteps, readI("pulses", sh.pulses));
-                    sh.rotate = readI("rotate", sh.rotate);
-                    sh.division = readF("division", sh.division);
-                    sh.probability = juce::jlimit(0.0f, 1.0f, readF("probability", sh.probability));
-                    sh.velocity = juce::jlimit(0.0f, 1.2f, readF("velocity", sh.velocity));
+                    if ((int) section.takes.size() >= kMaxTakes)
+                        break;
+                    section.takes.push_back(takeFromVar(takeItem));
                 }
             }
+            if (section.currentTake >= (int) section.takes.size())
+                section.currentTake = (int) section.takes.size() - 1;
             song.sections.push_back(section);
         }
     }

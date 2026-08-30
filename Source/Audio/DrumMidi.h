@@ -6,8 +6,19 @@ namespace groove
 {
 // UJAM Beatmaker / Virtual Drummer kit keys. Style/song-part keys start at C3 (60)
 // and must not be used for sequencer hits.
+constexpr int kMidiChDrums = 1;
+constexpr int kMidiChMoog  = 2;
+constexpr int kMidiChPoly  = 3; // G-Force Prophet 5
+constexpr int kMidiChKeys  = 4; // Electra 88 only
 constexpr int kUjamKitLow  = 36; // C1 BD 1
 constexpr int kUjamKitHigh = 51; // D#2 HH 4
+constexpr int kMidiNoteLow  = 0;   // C-1
+constexpr int kMidiNoteHigh = 127; // G9
+
+inline bool isValidMidiNote(int note)
+{
+    return note >= kMidiNoteLow && note <= kMidiNoteHigh;
+}
 constexpr int kFirstParamCc = 20; // pitch, decay, transient, noise, filter, drive, space, blend
 constexpr int kCcVolume     = 7;
 constexpr int kCcExpression = 11;
@@ -54,6 +65,13 @@ inline juce::String ujamKitName(int note)
 inline bool isUjamKitNote(int note)
 {
     return note >= kUjamKitLow && note <= kUjamKitHigh;
+}
+
+inline juce::MidiMessage withMidiChannel(juce::MidiMessage message, int channel)
+{
+    if (message.getChannel() > 0)
+        message.setChannel(juce::jlimit(1, 16, channel));
+    return message;
 }
 
 inline bool isSnareHit(int track, int note)
@@ -119,19 +137,61 @@ inline int paramToCcValue(Param p, float value)
 
 inline int ccForParam(Param p) { return kFirstParamCc + (int) p; }
 
+inline int parseMidiNote(const juce::String& text, int fallback)
+{
+    const auto t = text.trim();
+    if (t.isEmpty())
+        return isValidMidiNote(fallback) ? fallback : midiNoteForTrack(0);
+
+    for (int n = kUjamKitLow; n <= kUjamKitHigh; ++n)
+        if (ujamKitName(n).equalsIgnoreCase(t))
+            return n;
+
+    auto u = t.toUpperCase();
+    u = u.replace("DB", "C#").replace("EB", "D#").replace("GB", "F#")
+         .replace("AB", "G#").replace("BB", "A#");
+    static constexpr const char* names[] = {
+        "C#", "D#", "F#", "G#", "A#", "C", "D", "E", "F", "G", "A", "B"
+    };
+    static constexpr int pcs[] = { 1, 3, 6, 8, 10, 0, 2, 4, 5, 7, 9, 11 };
+    for (int i = 0; i < 12; ++i)
+    {
+        const auto name = juce::String(names[i]);
+        if (! u.startsWith(name))
+            continue;
+        const auto oct = u.substring(name.length());
+        if (oct.isEmpty() || ! oct.containsOnly("0123456789-"))
+            continue;
+        const int note = pcs[i] + (oct.getIntValue() + 1) * 12;
+        if (isValidMidiNote(note))
+            return note;
+    }
+
+    if (t.containsOnly("0123456789-"))
+    {
+        const int n = t.getIntValue();
+        if (isValidMidiNote(n))
+            return n;
+    }
+    return fallback;
+}
+
 inline void configureMidiNoteSlider(juce::Slider& s)
 {
-    s.setRange((double) kUjamKitLow, (double) kUjamKitHigh, 1.0);
+    s.setRange((double) kMidiNoteLow, (double) kMidiNoteHigh, 1.0);
     s.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
     s.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 52, 16);
     s.textFromValueFunction = [](double v) { return ujamKitName((int) std::round(v)); };
-    s.valueFromTextFunction = [](const juce::String&) { return (double) kUjamKitLow; };
+    s.valueFromTextFunction = [](const juce::String& text)
+    {
+        return (double) parseMidiNote(text, kUjamKitLow);
+    };
 }
 
 inline void fillUjamKitCombo(juce::ComboBox& box)
 {
     box.clear(juce::dontSendNotification);
-    for (int n = kUjamKitLow; n <= kUjamKitHigh; ++n)
-        box.addItem(ujamKitName(n) + "  " + midiNoteName(n), n);
+    for (int n = kMidiNoteLow; n <= kMidiNoteHigh; ++n)
+        box.addItem(ujamKitName(n) + "  " + midiNoteName(n), n + 1);
 }
 }

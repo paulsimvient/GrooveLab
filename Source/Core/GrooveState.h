@@ -14,9 +14,21 @@ public:
     juce::String lastPluginPath;
     int lastPluginProgram = -1;
     juce::String lastPluginPatch;
+    juce::String lastSynthPluginPath;
+    juce::String lastSynthPatch;
+    int lastSynthOctave = 0;
+    int lastKeyboardTarget = 0; // 0 Moog ch2, 1 Keys ch4, 2 Poly ch3, 3 Drums ch1
+    int keysPlugin = 0;         // unused; Electra and Prophet 5 are separate hosts
+    juce::String lastKeysPluginPath;
+    juce::String lastPolymaxPluginPath;
+    juce::String lastElectraPatch;
+    juce::String lastPolymaxPatch;
+    std::array<MidiLane, kMidiLanes> midiLanes = makeDefaultMidiLanes();
+    MixSettings mix;
     int soundMode = 2;
     double bpm = 124.0;
     Meter meter = Meter::fourFour;
+    MeterTransform meterTransform = MeterTransform::reflow;
     int selectedTrack = 0;
     int selectedStep = 0;
 
