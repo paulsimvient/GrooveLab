@@ -195,6 +195,8 @@ bool ExternalPluginHost::loadFromFile(const juce::File& file, juce::String& erro
         const juce::ScopedLock sl(pluginLock);
         plugin = std::move(instance);
         pluginFile = file;
+        gforceParams.clear();
+        gforceParamPlugin = nullptr;
     }
 
     scanUjamPatches();
@@ -216,6 +218,8 @@ void ExternalPluginHost::unload()
     pluginFile = juce::File();
     patches.clear();
     currentPatch = 0;
+    gforceParams.clear();
+    gforceParamPlugin = nullptr;
 }
 
 juce::String ExternalPluginHost::getName() const
@@ -288,6 +292,59 @@ namespace
 juce::String paramToken(const juce::String& s)
 {
     return s.toLowerCase().retainCharacters("abcdefghijklmnopqrstuvwxyz0123456789");
+}
+
+juce::String gforceExpandId(const juce::String& xmlId)
+{
+    auto s = xmlId.replace("Xlfo", "|xlfo|").replace("Xadsr", "|xadsr|");
+    juce::String split;
+    for (int i = 0; i < s.length(); ++i)
+    {
+        const auto c = s[i];
+        if (i > 0 && split.getLastCharacter() != '|')
+        {
+            const auto prev = s[i - 1];
+            const bool capAfterLower = juce::CharacterFunctions::isUpperCase(c)
+                                       && juce::CharacterFunctions::isLowerCase(prev);
+            const bool digitStart = juce::CharacterFunctions::isDigit(c)
+                                    && ! juce::CharacterFunctions::isDigit(prev);
+            const bool digitEnd = ! juce::CharacterFunctions::isDigit(c)
+                                  && juce::CharacterFunctions::isDigit(prev)
+                                  && c != '|';
+            if (capAfterLower || digitStart || digitEnd)
+                split << '|';
+        }
+        split << c;
+    }
+
+    juce::String compact;
+    for (auto part : juce::StringArray::fromTokens(split, "|", {}))
+    {
+        auto p = part.toLowerCase();
+        if (p.isEmpty())
+            continue;
+        if (p == "dpth") p = "depth";
+        else if (p == "freq") p = "frequency";
+        else if (p == "att") p = "attack";
+        else if (p == "dec") p = "decay";
+        else if (p == "rel") p = "release";
+        else if (p == "sus") p = "sustain";
+        else if (p == "amnt" || p == "amt") p = "amount";
+        else if (p == "rtrg") p = "retrigger";
+        else if (p == "phs") p = "phase";
+        else if (p == "lck") p = "lock";
+        else if (p == "shp") p = "shape";
+        else if (p == "noi") p = "noise";
+        else if (p == "int") p = "intro";
+        else if (p == "vel") p = "velocity";
+        else if (p == "del") p = "delay";
+        else if (p == "crv") p = "curve";
+        else if (p == "fb") p = "feedback";
+        else if (p == "dist") p = "distortion";
+        else if (p == "env") p = "envelope";
+        compact << p;
+    }
+    return compact;
 }
 
 bool paramMatchesKey(const juce::AudioProcessorParameter& p, const juce::String& key)
@@ -459,9 +516,65 @@ float uadRealToNorm(juce::AudioProcessorParameter& p, const juce::var& real)
     return juce::jlimit(0.0f, 1.0f, (float) target);
 }
 
+float gforceXmlToNorm(juce::AudioProcessorParameter& p, float raw)
+{
+    const int steps = p.getNumSteps();
+    const bool discrete = p.isDiscrete() && steps > 1 && steps < 512;
+
+    // Fractional 0–1 values are already normalized (Osc1Freq=0.5, Osc2Freq=0.25).
+    // Treating those as step indices slammed oscillator range to the bottom.
+    if (raw > 0.0f && raw < 1.0f)
+        return raw;
+
+    if (discrete)
+    {
+        for (int i = 0; i < steps; ++i)
+        {
+            const float n = (float) i / (float) (steps - 1);
+            if (uadTextMatches(p.getText(n, 32).trim(), (double) raw))
+                return n;
+        }
+
+        const float nearest = std::round(raw);
+        const bool whole = std::abs(raw - nearest) < 0.001f
+                           && nearest >= 0.0f && nearest < (float) steps;
+        // ChorusMode=2 is a real index. 0 and 1 on multi-step knobs are
+        // usually musical values (OctaveTranspose=0 → unison, not −2 oct).
+        if (whole && (steps == 2 || nearest > 1.0f))
+            return nearest / (float) (steps - 1);
+    }
+
+    if (raw >= 0.0f && raw <= 1.0f)
+        return raw;
+
+    // Bipolar knobs stored as real values (LayersPanB = -0.38).
+    {
+        const double lo = p.getText(0.0f, 16).getDoubleValue();
+        const double hi = p.getText(1.0f, 16).getDoubleValue();
+        const double span = hi - lo;
+        if (std::abs(span) > 0.05
+            && raw >= (float) juce::jmin(lo, hi) - 0.02f
+            && raw <= (float) juce::jmax(lo, hi) + 0.02f)
+            return juce::jlimit(0.0f, 1.0f, (float) ((raw - lo) / span));
+    }
+    return uadRealToNorm(p, raw);
+}
+
 juce::String compactStyle(const juce::String& s)
 {
     return s.toLowerCase().replace("bpm", {}).removeCharacters(" -_");
+}
+
+juce::StringArray splitPatchTags(const juce::String& s)
+{
+    juce::StringArray out;
+    for (auto t : juce::StringArray::fromTokens(s, ",", {}))
+    {
+        t = t.trim();
+        if (t.isNotEmpty())
+            out.addIfNotAlreadyThere(t);
+    }
+    return out;
 }
 
 int patchApplyRank(const juce::String& key)
@@ -547,6 +660,8 @@ void ExternalPluginHost::scanUjamPatches()
 
     if (patches.empty())
         scanUadPresets();
+    if (patches.empty())
+        scanGforcePatches();
 
     guessCurrentPatchFromLiveState();
 }
@@ -612,7 +727,16 @@ void ExternalPluginHost::scanUadPresets()
         if (e.name.isEmpty())
             e.name = f.getFileNameWithoutExtension().replaceCharacter('_', ' ');
         if (auto* tags = obj->getProperty("tags").getArray(); tags != nullptr && ! tags->isEmpty())
+        {
             e.category = tags->getFirst().toString();
+            for (const auto& tag : *tags)
+                e.types.addIfNotAlreadyThere(tag.toString());
+        }
+        e.collection = "Factory";
+        e.author = obj->getProperty("author").toString();
+        e.notes = obj->getProperty("description").toString();
+        if (e.notes.isEmpty())
+            e.notes = obj->getProperty("notes").toString();
         if (e.category.isEmpty())
             e.category = f.getParentDirectory().getFileName();
         e.uniqueName = true;
@@ -620,6 +744,106 @@ void ExternalPluginHost::scanUadPresets()
             defaultIndex = (int) patches.size();
         patches.push_back(std::move(e));
     }
+
+    currentPatch = juce::jlimit(0, juce::jmax(0, (int) patches.size() - 1), defaultIndex);
+    lastMidiProgram.store(currentPatch);
+}
+
+void ExternalPluginHost::scanGforcePatches()
+{
+    patches.clear();
+    currentPatch = 0;
+    const auto stem = pluginFile.getFileNameWithoutExtension();
+    if (stem.isEmpty())
+        return;
+
+    const juce::File roots[] = {
+        juce::File("/Library/Application Support/GForce").getChildFile(stem).getChildFile("Patches"),
+        juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+            .getChildFile("Library/Application Support/GForce")
+            .getChildFile(stem)
+            .getChildFile("Patches"),
+        juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+            .getChildFile("Library/Audio/Presets/GForce")
+            .getChildFile(stem)
+    };
+
+    juce::StringArray seenRoots;
+    juce::Array<juce::File> files;
+    for (auto root : roots)
+    {
+        if (root.isSymbolicLink())
+            root = root.getLinkedTarget();
+        const auto key = root.getFullPathName();
+        if (key.isEmpty() || seenRoots.contains(key) || ! root.isDirectory())
+            continue;
+        seenRoots.add(key);
+        files.addArray(root.findChildFiles(juce::File::findFiles, true, "*.xml"));
+    }
+
+    struct Order
+    {
+        static int compareElements(const juce::File& a, const juce::File& b)
+        {
+            return a.getFileNameWithoutExtension().compareNatural(b.getFileNameWithoutExtension());
+        }
+    };
+    Order order;
+    files.sort(order);
+
+    int defaultIndex = 0;
+    for (const auto& f : files)
+    {
+        PatchEntry e;
+        e.file = f;
+        e.name = f.getFileNameWithoutExtension();
+        juce::FileInputStream in(f);
+        if (in.openedOk())
+        {
+            juce::MemoryBlock mb;
+            in.readIntoMemoryBlock(mb, 2400);
+            const auto header = mb.toString();
+            auto grab = [&header](const juce::String& key)
+            {
+                const auto after = header.fromFirstOccurrenceOf(key + "=\"", false, false);
+                return after.isEmpty() ? juce::String()
+                                       : after.upToFirstOccurrenceOf("\"", false, false);
+            };
+            const auto metaName = grab("name");
+            if (metaName.isNotEmpty())
+                e.name = metaName;
+            e.author = grab("author");
+            e.notes = grab("notes");
+            e.collection = grab("collection");
+            e.category = grab("category");
+            e.types = splitPatchTags(grab("types"));
+            e.timbres = splitPatchTags(grab("timbres"));
+        }
+        if (e.collection.isEmpty())
+        {
+            const auto path = f.getFullPathName();
+            e.collection = path.containsIgnoreCase("/Users/") ? "User" : stem;
+        }
+        if (e.category.isEmpty())
+            e.category = e.collection;
+        e.uniqueName = true;
+        patches.push_back(std::move(e));
+    }
+
+    std::sort(patches.begin(), patches.end(),
+              [](const PatchEntry& a, const PatchEntry& b)
+              {
+                  const int c = a.category.compareNatural(b.category);
+                  return c != 0 ? c < 0 : a.name.compareNatural(b.name) < 0;
+              });
+
+    for (int i = 0; i < (int) patches.size(); ++i)
+        if (patches[(size_t) i].name.equalsIgnoreCase("Init")
+            || patches[(size_t) i].name.equalsIgnoreCase("Default"))
+        {
+            defaultIndex = i;
+            break;
+        }
 
     currentPatch = juce::jlimit(0, juce::jmax(0, (int) patches.size() - 1), defaultIndex);
     lastMidiProgram.store(currentPatch);
@@ -696,6 +920,167 @@ void ExternalPluginHost::applyUadPreset(const juce::File& file)
     }
 }
 
+void ExternalPluginHost::rebuildGforceParamMap()
+{
+    gforceParams.clear();
+    gforceParamPlugin = plugin.get();
+    if (plugin == nullptr)
+        return;
+
+    for (auto* p : plugin->getParameters())
+    {
+        if (p == nullptr || isHostedAutomationJunk(*p))
+            continue;
+        const auto key = paramToken(p->getName(80));
+        if (key.isEmpty() || key.startsWith("midicc"))
+            continue;
+        gforceParams.push_back({ key, p });
+    }
+}
+
+juce::AudioProcessorParameter* ExternalPluginHost::findGforceParam(const juce::String& xmlId,
+                                                                   const juce::String& layerPrefix) const
+{
+    juce::String want = gforceExpandId(xmlId);
+    int wantSteps = 0;
+    int occurrence = 0;
+    bool skipTranspose = false;
+
+    if (xmlId == "ArpEnable")          { want = "arpenable"; wantSteps = 2; }
+    else if (xmlId == "ChordsEnable")  { want = "chordsenable"; wantSteps = 2; }
+    else if (xmlId == "ArpMode")       { want = "arpmode"; }
+    else if (xmlId == "ChordsMode")    { want = "chordsmode"; }
+    else if (xmlId == "ArpRate")       { want = "arprate"; }
+    else if (xmlId == "ArpOctave")     { want = "arpoctave"; skipTranspose = true; }
+    else if (xmlId == "ArpGateLength") { want = "arpgatelength"; }
+    else if (xmlId == "ArpPattern")    { want = "arppattern"; }
+    else if (xmlId == "ArpChance")     { want = "arpchance"; }
+    else if (xmlId == "ArpSwing")      { want = "arpswing"; }
+    else if (xmlId == "ChordsStrum")   { want = "chordsstrum"; }
+    else if (xmlId == "ChordsPosition"){ want = "chordsposition"; }
+    else if (xmlId == "LayerMode")     { want = "layermode"; }
+    else if (xmlId == "Osc1Freq")      { want = "freq1"; }
+    else if (xmlId == "Osc2Freq")      { want = "freq2"; }
+    else if (xmlId == "OctaveTranspose") { want = "octavetranspose"; }
+    else if (xmlId == "LayerVolume")   { want = "volume"; }
+    else if (xmlId == "FilterEnvAmount") { want = "filterenvelopeamount"; }
+    else if (xmlId == "GlobalHold")    { want = "hold"; }
+    else if (xmlId == "GlobalRel")     { want = "release"; }
+    else if (xmlId == "FxDelayEnableA")  { want = "delayenablea"; }
+    else if (xmlId == "FxDelayEnableB")  { want = "delayenableb"; }
+    else if (xmlId == "FxReverbEnableA") { want = "reverbenablea"; }
+    else if (xmlId == "FxReverbEnableB") { want = "reverbenableb"; }
+    else if (xmlId.startsWith("Controls"))
+    {
+        want = gforceExpandId(xmlId.fromFirstOccurrenceOf("Controls", false, false));
+        if (want == "poly") want = "polyphony";
+        else if (want == "polymode") want = "polyphonymode";
+        else if (want == "portagliss") want = "portamentoglissando";
+    }
+
+    if (want.isEmpty())
+        return nullptr;
+
+    auto search = [&](const juce::String& key, int occ) -> juce::AudioProcessorParameter*
+    {
+        int seen = 0;
+        for (const auto& entry : gforceParams)
+        {
+            if (entry.key != key || entry.param == nullptr)
+                continue;
+            if (skipTranspose && entry.key.contains("transpose"))
+                continue;
+            if (wantSteps > 0 && entry.param->getNumSteps() != wantSteps)
+                continue;
+            if (seen == occ)
+                return entry.param;
+            ++seen;
+        }
+        return nullptr;
+    };
+
+    if (layerPrefix.isNotEmpty())
+        if (auto* p = search(layerPrefix + want, 0))
+            return p;
+    return search(want, layerPrefix == "layerb" ? 1 : occurrence);
+}
+
+void ExternalPluginHost::applyGforcePatch(const juce::File& file)
+{
+    auto xml = juce::parseXML(file);
+    if (xml == nullptr || ! xml->hasTagName("patch"))
+        return;
+
+    juce::AudioPluginInstance* inst = nullptr;
+    {
+        const juce::ScopedLock sl(pluginLock);
+        inst = plugin.get();
+    }
+    if (inst == nullptr)
+        return;
+
+    if (gforceParamPlugin != inst || gforceParams.empty())
+        rebuildGforceParamMap();
+
+    // Prefer the plugin's own preset load (same bytes its browser uses).
+    {
+        juce::MemoryBlock raw;
+        if (file.loadFileAsData(raw) && raw.getSize() > 0)
+            inst->setStateInformation(raw.getData(), (int) raw.getSize());
+        juce::MemoryBlock juceBin;
+        juce::AudioProcessor::copyXmlToBinary(*xml, juceBin);
+        inst->setStateInformation(juceBin.getData(), (int) juceBin.getSize());
+    }
+
+    auto applyParam = [this](juce::XmlElement* el, const juce::String& layerPrefix)
+    {
+        if (el == nullptr)
+            return;
+        const auto xmlId = el->getStringAttribute("id");
+        if (xmlId.contains("Xlfo") || xmlId.contains("Xadsr") || xmlId == "OctaveTranspose")
+            return;
+        auto* p = findGforceParam(xmlId, layerPrefix);
+        if (p == nullptr)
+            return;
+        const float raw = (float) el->getDoubleAttribute("value");
+        const float norm = juce::jlimit(0.0f, 1.0f, gforceXmlToNorm(*p, raw));
+        if (std::abs(p->getValue() - norm) < 0.0008f)
+            return;
+        p->setValueNotifyingHost(norm);
+    };
+
+    if (auto* data = xml->getChildByName("parameter_data"))
+    {
+        for (auto* el : data->getChildIterator())
+        {
+            if (el->hasTagName("PARAM"))
+            {
+                applyParam(el, {});
+            }
+            else if (el->hasTagName("parameter_layer")
+                     && el->getIntAttribute("empty", 0) == 0)
+            {
+                const auto layerId = el->getStringAttribute("id");
+                const juce::String prefix = (layerId == "2") ? "layerb" : "layera";
+                for (auto* param : el->getChildIterator())
+                    if (param->hasTagName("PARAM"))
+                        applyParam(param, prefix);
+            }
+        }
+    }
+
+    for (const auto& entry : gforceParams)
+    {
+        if (entry.param == nullptr || ! entry.key.contains("octavetranspose"))
+            continue;
+        float n = entry.param->getValueForText("0");
+        if (n < 0.0f || n > 1.0f)
+            n = 0.0f;
+        entry.param->setValueNotifyingHost(n);
+    }
+    inst->updateHostDisplay();
+}
+
 void ExternalPluginHost::applyPatchFile(const juce::File& file)
 {
     juce::AudioPluginInstance* inst = nullptr;
@@ -705,6 +1090,12 @@ void ExternalPluginHost::applyPatchFile(const juce::File& file)
     }
     if (inst == nullptr || ! file.existsAsFile())
         return;
+
+    if (file.hasFileExtension("xml"))
+    {
+        applyGforcePatch(file);
+        return;
+    }
 
     const auto parsed = juce::JSON::parse(file);
     auto* obj = parsed.getDynamicObject();
@@ -794,6 +1185,26 @@ int ExternalPluginHost::getKitIndex() const
         return juce::jlimit(0, steps - 1, (int) std::round(p->getValue() * (float) (steps - 1)));
     }
     return juce::jlimit(0, 127, lastMidiProgram.load());
+}
+
+ExternalPluginHost::PatchInfo ExternalPluginHost::getPatchInfo(int index) const
+{
+    PatchInfo info;
+    if (patches.empty())
+    {
+        info.name = getKitName(index);
+        return info;
+    }
+    const auto& e = patches[(size_t) juce::jlimit(0, (int) patches.size() - 1, index)];
+    info.file = e.file;
+    info.name = e.name;
+    info.collection = e.collection;
+    info.category = e.category;
+    info.author = e.author;
+    info.notes = e.notes;
+    info.types = e.types;
+    info.timbres = e.timbres;
+    return info;
 }
 
 juce::String ExternalPluginHost::getKitName(int index) const

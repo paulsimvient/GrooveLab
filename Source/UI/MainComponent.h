@@ -12,6 +12,7 @@
 #include "SynthKeyboard.h"
 #include "MixStrip.h"
 #include "EvolutionLab.h"
+#include "PatchBrowser.h"
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::MenuBarModel,
@@ -50,6 +51,7 @@ private:
     void drawGrid(juce::Graphics&);
     void layoutEvolutionLab();
     void toggleEvolutionWindow();
+    void showProphetBrowser();
     void refreshMidiInputs();
     void autoSelectMidiInput();
     static bool isVirtualMidiName(const juce::String&);
@@ -135,6 +137,7 @@ private:
     SynthKeyboard synthKeyboard;
     MixStrip mixStrip;
     std::unique_ptr<EvolutionWindow> evolutionWindow;
+    std::unique_ptr<PatchBrowserWindow> prophetBrowser;
 
     juce::TextButton playButton { "PLAY" };
     juce::TextButton resetButton { "RESET" };

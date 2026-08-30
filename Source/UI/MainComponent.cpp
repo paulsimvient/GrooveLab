@@ -403,16 +403,7 @@ MainComponent::MainComponent()
         else
             tryLoadKeys();
     };
-    mixStrip.polySound.onChange = [this]
-    {
-        if (refreshing) return;
-        const int id = mixStrip.polySound.getSelectedId();
-        if (id <= 0) return;
-        polymaxHost.setKitIndex(id - 1);
-        storeCurrentPolyPatch();
-        evolutionStatus.setText("PROPHET · " + polymaxHost.getKitName(id - 1), juce::dontSendNotification);
-        engine.saveAutosave();
-    };
+    mixStrip.polySound.onClick = [this] { showProphetBrowser(); };
     mixStrip.polyPrev.onClick = [this]
     {
         polymaxHost.stepKit(-1);
@@ -438,6 +429,7 @@ MainComponent::MainComponent()
         else
             tryLoadPolymax();
     };
+    mixStrip.polyBrowse.onClick = [this] { showProphetBrowser(); };
 
     clearLocks.onClick=[this]
     {
@@ -591,6 +583,7 @@ MainComponent::~MainComponent()
     keysHost.hideEditor();
     polymaxHost.hideEditor();
     evolutionWindow.reset();
+    prophetBrowser.reset();
     setLookAndFeel(nullptr);
 }
 
@@ -637,6 +630,8 @@ void MainComponent::pushMixToDsp()
     mixBus.busComp.store(m.busComp);
     mixBus.busDelay.store(m.busDelay);
     mixBus.masterVol.store(m.masterVol);
+    mixBus.delayFeedback.store(m.delayFeedback);
+    mixBus.delayNote.store(m.delayNote);
     mixStrip.setBpm(engine.state().bpm);
     for (int i = 0; i < groove::kEqBands; ++i)
         mixBus.eqGainDb[(size_t) i].store(m.eqGainDb[(size_t) i]);
@@ -931,6 +926,7 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelIndex, const juce::St
         menu.addItem(225, polyLoaded ? ("Show " + polymaxHost.getName() + " UI") : "Show Prophet 5 UI",
                      polyLoaded, polymaxHost.isEditorOpen());
         menu.addItem(227, "Load Prophet 5", true, polyLoaded);
+        menu.addItem(228, "Browse Prophet patches...", polyLoaded);
         menu.addSeparator();
         menu.addItem(226, "Show All Instrument UIs");
         return menu;
@@ -999,6 +995,7 @@ void MainComponent::menuItemSelected(int menuItemID, int)
     }
     if (menuItemID == 226) { showAllInstrumentEditors(); return; }
     if (menuItemID == 227) { tryLoadPolymax(); return; }
+    if (menuItemID == 228) { showProphetBrowser(); return; }
     if (menuItemID == 1100) { browseForSynth(); return; }
     if (menuItemID == 230) { newGroove(); return; }
     if (menuItemID == 231) { showLoadMenu(); return; }
@@ -2132,7 +2129,7 @@ void MainComponent::paint(juce::Graphics& g)
 
 void MainComponent::resized()
 {
-    int margin=12,header=72,foot=34,rightW=330,gap=10,lowerH=240; auto content=getLocalBounds().withTrimmedTop(header).withTrimmedBottom(foot + synthKeyboardH).reduced(margin,8); auto right=content.removeFromRight(rightW);content.removeFromRight(gap);auto bottom=content.removeFromBottom(lowerH);content.removeFromBottom(gap);sequencerPanel=content;inspectorPanel=right;soundPanel=bottom;
+    int margin=12,header=72,foot=34,rightW=330,gap=10,lowerH=268; auto content=getLocalBounds().withTrimmedTop(header).withTrimmedBottom(foot + synthKeyboardH).reduced(margin,8); auto right=content.removeFromRight(rightW);content.removeFromRight(gap);auto bottom=content.removeFromBottom(lowerH);content.removeFromBottom(gap);sequencerPanel=content;inspectorPanel=right;soundPanel=bottom;
 
     const int hy = 19, hh = 32, hg = 6;
     int x = 308;
@@ -2253,6 +2250,29 @@ void MainComponent::layoutEvolutionLab()
     trackVelocity.setBounds(rp.removeFromTop(26));
 }
 
+void MainComponent::showProphetBrowser()
+{
+    if (! polymaxHost.isLoaded())
+    {
+        tryLoadPolymax();
+        if (! polymaxHost.isLoaded())
+            return;
+    }
+    if (prophetBrowser == nullptr)
+    {
+        prophetBrowser = std::make_unique<PatchBrowserWindow>(polymaxHost, look, "PROPHET  ·  Patches");
+        prophetBrowser->browser.onPatchChosen = [this]
+        {
+            storeCurrentPolyPatch();
+            refreshPolyKitUi(true);
+            evolutionStatus.setText("PROPHET · " + polymaxHost.getCurrentPatchName(),
+                                    juce::dontSendNotification);
+            engine.saveAutosave();
+        };
+    }
+    prophetBrowser->showAndRefresh();
+}
+
 void MainComponent::toggleEvolutionWindow()
 {
     if (evolutionWindow == nullptr)
@@ -2346,7 +2366,10 @@ void MainComponent::timerCallback()
             const int i = juce::jlimit(0, (int) song.sections.size() - 1, song.current);
             part = groove::songPartName(song.sections[(size_t) i].part);
         }
-        footer.setText("REC · " + part + "  ·  play pads  ·  REC off commits  ·  KEEP TAKE stores a version",
+        juce::String q = engine.isRecordQuantize()
+            ? juce::String("QUANTIZE ") + groove::kQuantizeNoteNames[engine.getRecordQuantizeNote()]
+            : "quantize off";
+        footer.setText("REC · " + part + "  ·  " + q + "  ·  play pads  ·  REC off commits  ·  KEEP TAKE stores a version",
                        juce::dontSendNotification);
     }
     else if (footer.getText().startsWith("REC"))
@@ -2543,7 +2566,7 @@ void MainComponent::applyStoredPolyPatch()
     const auto& patch = engine.state().lastPolymaxPatch;
     if (patch.isNotEmpty() && polymaxHost.setKitByName(patch))
         return;
-    if (! polymaxHost.setKitByName("Default"))
+    if (! polymaxHost.setKitByName("Init") && ! polymaxHost.setKitByName("Default"))
         polymaxHost.setKitIndex(0);
     storeCurrentPolyPatch();
 }
@@ -2597,39 +2620,29 @@ void MainComponent::refreshPolyKitUi(bool rebuildList)
     mixStrip.polySound.setEnabled(loaded);
     mixStrip.polyPrev.setEnabled(loaded);
     mixStrip.polyNext.setEnabled(loaded);
+    mixStrip.polyBrowse.setEnabled(loaded);
 
     if (! loaded)
     {
         if (rebuildList || polyKitListCount != 0)
         {
             const juce::ScopedValueSetter<bool> sv(refreshing, true);
-            mixStrip.polySound.clear(juce::dontSendNotification);
-            mixStrip.polySound.addItem("Load Prophet 5", 1);
-            mixStrip.polySound.setSelectedId(1, juce::dontSendNotification);
+            mixStrip.polySound.setButtonText("Load Prophet 5");
             polyKitListCount = 0;
         }
         return;
     }
 
     const int n = polymaxHost.getKitCount();
-    if (rebuildList || n != polyKitListCount)
+    auto name = polymaxHost.getCurrentPatchName();
+    if (name.isEmpty())
+        name = polymaxHost.getKitName(polymaxHost.getKitIndex());
+    if (name.isEmpty())
+        name = "PROPHET SOUND";
+    if (rebuildList || n != polyKitListCount
+        || mixStrip.polySound.getButtonText() != name)
     {
-        const juce::ScopedValueSetter<bool> sv(refreshing, true);
-        mixStrip.polySound.clear(juce::dontSendNotification);
-        for (int i = 0; i < n; ++i)
-        {
-            auto name = polymaxHost.getKitName(i);
-            if (name.isEmpty())
-                name = juce::String(i + 1).paddedLeft('0', 2);
-            mixStrip.polySound.addItem(name, i + 1);
-        }
+        mixStrip.polySound.setButtonText(name);
         polyKitListCount = n;
-    }
-
-    const int cur = juce::jlimit(0, juce::jmax(0, n - 1), polymaxHost.getKitIndex());
-    if (mixStrip.polySound.getSelectedId() != cur + 1)
-    {
-        const juce::ScopedValueSetter<bool> sv(refreshing, true);
-        mixStrip.polySound.setSelectedId(cur + 1, juce::dontSendNotification);
     }
 }

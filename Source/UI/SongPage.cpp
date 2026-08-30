@@ -141,6 +141,31 @@ SongPage::SongPage(groove::GrooveEngine& e)
         repaint();
     };
     addAndMakeVisible(recButton);
+
+    quantizeButton.setClickingTogglesState(true);
+    quantizeButton.setToggleState(true, juce::dontSendNotification);
+    quantizeButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff0f80d8));
+    quantizeButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    quantizeButton.setTooltip("Snap recorded notes to the grid when you take");
+    quantizeButton.onClick = [this]
+    {
+        engine.setRecordQuantize(quantizeButton.getToggleState());
+        quantizeBox.setEnabled(quantizeButton.getToggleState());
+        if (quantizeButton.getToggleState() && quantizeBox.getSelectedId() <= 0)
+            quantizeBox.setSelectedId(groove::kDefaultQuantizeNote + 1, juce::dontSendNotification);
+    };
+    addAndMakeVisible(quantizeButton);
+    for (int i = 0; i < groove::kQuantizeNoteCount; ++i)
+        quantizeBox.addItem(groove::kQuantizeNoteNames[i], i + 1);
+    quantizeBox.setSelectedId(groove::kDefaultQuantizeNote + 1, juce::dontSendNotification);
+    quantizeBox.setTooltip("Quantize grid");
+    quantizeBox.onChange = [this]
+    {
+        if (refreshing) return;
+        engine.setRecordQuantizeNote(quantizeBox.getSelectedId() - 1);
+    };
+    addAndMakeVisible(quantizeBox);
+
     keepTakeButton.onClick = [this]
     {
         engine.keepCurrentTake();
@@ -386,6 +411,9 @@ void SongPage::refreshFromEngine()
         }
     }
     recButton.setToggleState(engine.isRecording(), juce::dontSendNotification);
+    quantizeButton.setToggleState(engine.isRecordQuantize(), juce::dontSendNotification);
+    quantizeBox.setSelectedId(engine.getRecordQuantizeNote() + 1, juce::dontSendNotification);
+    quantizeBox.setEnabled(engine.isRecordQuantize());
     deleteTakeButton.setEnabled(! song.sections.empty());
     rebuildTakeButtons();
     refreshing = false;
@@ -483,6 +511,10 @@ void SongPage::resized()
     deleteTakeButton.setBounds(title.removeFromRight(96).reduced(0, 4));
     title.removeFromRight(8);
     keepTakeButton.setBounds(title.removeFromRight(92).reduced(0, 4));
+    title.removeFromRight(8);
+    quantizeBox.setBounds(title.removeFromRight(58).reduced(0, 4));
+    title.removeFromRight(4);
+    quantizeButton.setBounds(title.removeFromRight(86).reduced(0, 4));
     auto tools = er.removeFromTop(32);
     followButton.setBounds(tools.removeFromLeft(118));
     tools.removeFromLeft(8);
@@ -962,6 +994,6 @@ void SongPage::paint(juce::Graphics& g)
                 status += "  " + juce::String(groove::midiLaneName(recLane));
         }
     }
-    g.drawText(status, editPanel.removeFromTop(34).reduced(88, 0).withTrimmedRight(280),
+    g.drawText(status, editPanel.removeFromTop(34).reduced(88, 0).withTrimmedRight(430),
                juce::Justification::centredLeft);
 }

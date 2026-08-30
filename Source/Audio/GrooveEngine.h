@@ -107,6 +107,10 @@ public:
 
     void setRecording(bool shouldRecord);
     bool isRecording() const noexcept { return recording.load(); }
+    void setRecordQuantize(bool shouldQuantize);
+    bool isRecordQuantize() const noexcept { return grooveState.recordQuantize; }
+    void setRecordQuantizeNote(int note);
+    int getRecordQuantizeNote() const noexcept { return grooveState.recordQuantizeNote; }
     int keepCurrentTake();
     void restoreTake(int index);
     void removeTake(int index);
@@ -175,6 +179,10 @@ private:
     void closeOpenLaneNotesLocked();
     void beginOpenLaneNoteLocked(int lane, int note, float velocity);
     void finishOpenLaneNoteLocked(int lane, int note);
+    int recordLoopLength() const;
+    int quantizedRecordStep(int step, int length) const;
+    void quantizeLiveTakeLocked();
+    void quantizeMidiLaneLocked(MidiLane& lane, int length);
     void scheduleLaneMidi(const juce::MidiMessage& message, int sample, int blockSamples);
     void cancelPendingLaneNoteOff(int channel, int note);
     int laneStepSamples() const;

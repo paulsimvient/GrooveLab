@@ -29,6 +29,19 @@ public:
     bool setKitByName(const juce::String& name);
     void stepKit(int delta);
 
+    struct PatchInfo
+    {
+        juce::File file;
+        juce::String name;
+        juce::String collection;
+        juce::String category;
+        juce::String author;
+        juce::String notes;
+        juce::StringArray types;
+        juce::StringArray timbres;
+    };
+    PatchInfo getPatchInfo(int index) const;
+
     void setEditorIdentity(const juce::String& title, juce::Point<int> screenPos);
     void setPluginMidiChannel(int channel);
     void showEditor();
@@ -45,7 +58,12 @@ private:
     {
         juce::File file;
         juce::String name;
+        juce::String collection;
         juce::String category;
+        juce::String author;
+        juce::String notes;
+        juce::StringArray types;
+        juce::StringArray timbres;
         juce::String styleName;
         bool uniqueName = true;
     };
@@ -56,8 +74,11 @@ private:
     juce::AudioProcessorParameter* kitParameter() const;
     void scanUjamPatches();
     void scanUadPresets();
+    void scanGforcePatches();
     void applyPatchFile(const juce::File&);
     void applyUadPreset(const juce::File&);
+    void applyGforcePatch(const juce::File&);
+    void rebuildGforceParamMap();
     void guessCurrentPatchFromLiveState();
 
     juce::AudioPluginFormatManager formatManager;
@@ -78,6 +99,15 @@ private:
     std::atomic<int> pluginMidiChannel { 1 };
     juce::String editorTitle;
     juce::Point<int> editorPos { 80, 80 };
+    struct GforceParam
+    {
+        juce::String key;
+        juce::AudioProcessorParameter* param = nullptr;
+    };
+    std::vector<GforceParam> gforceParams;
+    void* gforceParamPlugin = nullptr;
+    juce::AudioProcessorParameter* findGforceParam(const juce::String& xmlId,
+                                                   const juce::String& layerPrefix) const;
     void presentEditorNow();
 };
 }

@@ -21,34 +21,40 @@ public:
     void resized() override;
     void mouseDown(const juce::MouseEvent&) override;
 
-    juce::ComboBox drumSound, synthSound, keysSound, polySound;
+    juce::ComboBox drumSound, synthSound, keysSound;
+    juce::TextButton polySound { "PROPHET SOUND" };
     juce::TextButton drumPrev { "◀" }, drumNext { "▶" };
     juce::TextButton synthPrev { "◀" }, synthNext { "▶" };
     juce::TextButton keysPrev { "◀" }, keysNext { "▶" };
     juce::TextButton polyPrev { "◀" }, polyNext { "▶" };
     juce::TextButton drumUi { "DRUM UI" }, synthUi { "MOOG UI" };
     juce::TextButton keysUi { "KEYS UI" }, polyUi { "P5 UI" };
+    juce::TextButton polyBrowse { "FIND" };
 
     bool isDrumPopupActive() const { return drumSound.isPopupActive(); }
     bool isSynthPopupActive() const { return synthSound.isPopupActive(); }
     bool isKeysPopupActive() const { return keysSound.isPopupActive(); }
-    bool isPolyPopupActive() const { return polySound.isPopupActive(); }
+    bool isPolyPopupActive() const { return false; }
 
 private:
     void configure(juce::Slider&, double min, double max, double step);
     void configureEq(juce::Slider&);
     void bind(juce::Slider&);
     void stylePicker(juce::ComboBox&, juce::TextButton& prev, juce::TextButton& next);
+    void stylePicker(juce::TextButton&, juce::TextButton& prev, juce::TextButton& next);
 
     juce::Slider drumVol, drumLeft, drumRight;
     juce::Slider synthVol, synthLeft, synthRight;
     juce::Slider keysVol, keysLeft, keysRight;
     juce::Slider polyVol, polyLeft, polyRight;
-    juce::Slider masterVol, busComp, busDelay;
+    juce::Slider masterVol, busComp, busDelay, delayFeedback;
     std::array<juce::Slider, groove::kEqBands> eqSliders;
     std::array<juce::Label, groove::kEqBands> eqLabels;
+    std::array<juce::TextButton, 5> delayNotes;
     void refreshChannelHighlight();
     void refreshDelayInfo();
+    void refreshDelayNotes();
+    void selectDelayNote(int index);
 
     juce::Label drumsTitle, synthTitle, keysTitle, polyTitle, busTitle;
     int activeMidiChannel = 0;
@@ -56,7 +62,8 @@ private:
     juce::Label synthVolL, synthLL, synthRL;
     juce::Label keysVolL, keysLL, keysRL;
     juce::Label polyVolL, polyLL, polyRL;
-    juce::Label masterL, compL, delayL, delayInfo, eqTitle;
+    juce::Label masterL, compL, delayL, delayFbL, delayInfo, eqTitle;
+    int delayNote = 2;
     double currentBpm = 124.0;
     bool refreshing = false;
 

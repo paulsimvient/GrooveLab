@@ -2,6 +2,7 @@
 #include "DrumMidi.h"
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace groove
 {
@@ -1269,8 +1270,13 @@ void GrooveEngine::recordLaneNoteLocked(int lane, int note, float velocity, int 
     if (lane < 0 || lane >= kMidiLanes)
         return;
     auto& L = grooveState.midiLanes[(size_t) lane];
-    const int step = juce::jlimit(0, kSteps - 1, startStep);
-    const int len = juce::jmax(1, lengthSteps);
+    const int loop = recordLoopLength();
+    const int step = quantizedRecordStep(startStep, loop);
+    const int grid = grooveState.recordQuantize
+        ? quantizeGridSteps(grooveState.recordQuantizeNote) : 1;
+    const int len = juce::jmax(1, grooveState.recordQuantize
+        ? juce::jmax(grid, ((lengthSteps + grid / 2) / grid) * grid)
+        : lengthSteps);
     for (auto& existing : L.notes)
         if (existing.step == step && existing.note == note)
         {
@@ -1286,7 +1292,7 @@ void GrooveEngine::recordLaneExtraLocked(int lane, int type, int data1, int data
     if (lane < 0 || lane >= kMidiLanes || type <= 0)
         return;
     auto& L = grooveState.midiLanes[(size_t) lane];
-    const int step = juce::jlimit(0, kSteps - 1, sequencer.getCurrentStep());
+    const int step = quantizedRecordStep(sequencer.getCurrentStep(), recordLoopLength());
     for (auto& existing : L.extras)
         if (existing.step == step && existing.type == type
             && (type != 3 || existing.data1 == data1))
@@ -1303,7 +1309,8 @@ void GrooveEngine::beginOpenLaneNoteLocked(int lane, int note, float velocity)
     if (lane < 0 || lane >= kMidiLanes || note < 0 || note > 127)
         return;
     openNoteCount[(size_t) lane][(size_t) note] = laneStepCounter;
-    openNoteStep[(size_t) lane][(size_t) note] = juce::jlimit(0, kSteps - 1, sequencer.getCurrentStep());
+    openNoteStep[(size_t) lane][(size_t) note] = quantizedRecordStep(sequencer.getCurrentStep(),
+                                                                    recordLoopLength());
     openNoteVel[(size_t) lane][(size_t) note] = juce::jlimit(0.05f, 1.2f, velocity);
 }
 
@@ -1332,7 +1339,7 @@ void GrooveEngine::recordLaneCcLocked(int lane, int number, int value)
     if (lane < 0 || lane >= kMidiLanes)
         return;
     auto& L = grooveState.midiLanes[(size_t) lane];
-    const int step = juce::jlimit(0, kSteps - 1, sequencer.getCurrentStep());
+    const int step = quantizedRecordStep(sequencer.getCurrentStep(), recordLoopLength());
     for (auto& existing : L.ccs)
         if (existing.step == step && existing.number == number)
         {
@@ -1347,7 +1354,7 @@ void GrooveEngine::recordLanePatchLocked(int lane, const juce::String& name, int
     if (lane < 0 || lane >= kMidiLanes || name.isEmpty())
         return;
     auto& L = grooveState.midiLanes[(size_t) lane];
-    const int step = juce::jlimit(0, kSteps - 1, sequencer.getCurrentStep());
+    const int step = quantizedRecordStep(sequencer.getCurrentStep(), recordLoopLength());
     if (! L.patches.empty())
     {
         auto& last = L.patches.back();
@@ -1457,6 +1464,7 @@ void GrooveEngine::recordNoteLocked(int note, float velocity, int channel, juce:
     int step = sequencer.getTrackStep(track) % length;
     if (step < 0)
         step += length;
+    step = quantizedRecordStep(step, length);
     auto& st = tr.steps[(size_t) step];
     st.overrideMode = StepOverrideMode::forceOn;
     st.active = true;
@@ -1504,11 +1512,157 @@ void GrooveEngine::clearMidiLanesLocked()
     pendingLaneMidi.clear();
 }
 
+int GrooveEngine::recordLoopLength() const
+{
+    return juce::jlimit(1, kSteps, grooveState.tracks[0].generatorSteps);
+}
+
+int GrooveEngine::quantizedRecordStep(int step, int length) const
+{
+    length = juce::jmax(1, length);
+    if (! grooveState.recordQuantize)
+        return juce::jlimit(0, length - 1, ((step % length) + length) % length);
+    return snapStepToGrid(step, quantizeGridSteps(grooveState.recordQuantizeNote), length);
+}
+
+void GrooveEngine::quantizeMidiLaneLocked(MidiLane& lane, int length)
+{
+    const int grid = quantizeGridSteps(grooveState.recordQuantizeNote);
+    auto snap = [grid, length](int step) { return snapStepToGrid(step, grid, length); };
+    auto snapLen = [grid](int steps)
+    {
+        return juce::jmax(grid, ((juce::jmax(1, steps) + grid / 2) / grid) * grid);
+    };
+
+    std::vector<MidiLaneNote> notes;
+    for (auto n : lane.notes)
+    {
+        n.step = snap(n.step);
+        n.lengthSteps = snapLen(n.lengthSteps);
+        bool merged = false;
+        for (auto& existing : notes)
+            if (existing.step == n.step && existing.note == n.note)
+            {
+                existing.velocity = n.velocity;
+                existing.lengthSteps = juce::jmax(existing.lengthSteps, n.lengthSteps);
+                merged = true;
+                break;
+            }
+        if (! merged)
+            notes.push_back(n);
+    }
+    lane.notes.swap(notes);
+
+    std::vector<MidiLaneCc> ccs;
+    for (auto c : lane.ccs)
+    {
+        c.step = snap(c.step);
+        bool merged = false;
+        for (auto& existing : ccs)
+            if (existing.step == c.step && existing.number == c.number)
+            {
+                existing.value = c.value;
+                merged = true;
+                break;
+            }
+        if (! merged)
+            ccs.push_back(c);
+    }
+    lane.ccs.swap(ccs);
+
+    std::vector<MidiLaneExtra> extras;
+    for (auto e : lane.extras)
+    {
+        e.step = snap(e.step);
+        bool merged = false;
+        for (auto& existing : extras)
+            if (existing.step == e.step && existing.type == e.type
+                && (e.type != 3 || existing.data1 == e.data1))
+            {
+                existing.data1 = e.data1;
+                existing.data2 = e.data2;
+                merged = true;
+                break;
+            }
+        if (! merged)
+            extras.push_back(e);
+    }
+    lane.extras.swap(extras);
+
+    std::vector<MidiLanePatch> patches;
+    for (auto p : lane.patches)
+    {
+        p.step = snap(p.step);
+        bool merged = false;
+        for (auto& existing : patches)
+            if (existing.step == p.step && existing.name == p.name && existing.kitIndex == p.kitIndex)
+            {
+                merged = true;
+                break;
+            }
+        if (! merged)
+            patches.push_back(p);
+    }
+    lane.patches.swap(patches);
+}
+
+void GrooveEngine::quantizeLiveTakeLocked()
+{
+    if (! grooveState.recordQuantize)
+        return;
+
+    const int loop = recordLoopLength();
+    for (auto& lane : grooveState.midiLanes)
+        quantizeMidiLaneLocked(lane, loop);
+
+    for (auto& tr : grooveState.tracks)
+    {
+        const int length = juce::jmax(1, tr.generatorSteps);
+        std::array<Step, kSteps> moved = tr.steps;
+        std::vector<std::pair<int, Step>> hits;
+        for (int s = 0; s < length; ++s)
+        {
+            if (tr.steps[(size_t) s].overrideMode != StepOverrideMode::forceOn)
+                continue;
+            hits.push_back({ s, tr.steps[(size_t) s] });
+            moved[(size_t) s].overrideMode = StepOverrideMode::forceOff;
+            moved[(size_t) s].active = false;
+        }
+        for (auto& hit : hits)
+        {
+            const int dest = quantizedRecordStep(hit.first, length);
+            auto& st = moved[(size_t) dest];
+            st = hit.second;
+            st.overrideMode = StepOverrideMode::forceOn;
+            st.active = true;
+        }
+        tr.steps = moved;
+        int pulses = 0;
+        for (int s = 0; s < length; ++s)
+            if (tr.steps[(size_t) s].overrideMode == StepOverrideMode::forceOn)
+                ++pulses;
+        tr.pulses = pulses;
+    }
+}
+
+void GrooveEngine::setRecordQuantize(bool shouldQuantize)
+{
+    const juce::ScopedLock sl(stateLock);
+    grooveState.recordQuantize = shouldQuantize;
+}
+
+void GrooveEngine::setRecordQuantizeNote(int note)
+{
+    const juce::ScopedLock sl(stateLock);
+    grooveState.recordQuantizeNote = juce::jlimit(0, kQuantizeNoteCount - 1, note);
+}
+
 int GrooveEngine::keepCurrentTakeLocked()
 {
     if (grooveState.song.sections.empty())
         return -1;
     closeOpenLaneNotesLocked();
+    quantizeLiveTakeLocked();
     grooveState.captureLiveToCurrentSection();
     auto& section = grooveState.song.sections[(size_t) grooveState.song.current];
     if ((int) section.takes.size() >= kMaxTakes)
@@ -1547,6 +1701,7 @@ void GrooveEngine::setRecordingLocked(bool shouldRecord)
     {
         recording.store(false);
         closeOpenLaneNotesLocked();
+        quantizeLiveTakeLocked();
         grooveState.captureLiveToCurrentSection();
         journal.append("record", "commit");
     }
@@ -1927,6 +2082,8 @@ void GrooveEngine::newProject()
         const auto keepPolymax = grooveState.lastPolymaxPatch;
         const auto keepMix = grooveState.mix;
         const auto keepTransform = grooveState.meterTransform;
+        const bool keepQuantize = grooveState.recordQuantize;
+        const int keepQuantizeNote = grooveState.recordQuantizeNote;
         grooveState = GrooveState();
         grooveState.lastPluginPath = keepPlugin;
         grooveState.soundMode = keepMode;
@@ -1943,6 +2100,8 @@ void GrooveEngine::newProject()
         grooveState.lastPolymaxPatch = keepPolymax;
         grooveState.mix = keepMix;
         grooveState.meterTransform = keepTransform;
+        grooveState.recordQuantize = keepQuantize;
+        grooveState.recordQuantizeNote = keepQuantizeNote;
         ancestryGraph = {};
         sequencer.reset();
         songSamplesInSection = 0.0;

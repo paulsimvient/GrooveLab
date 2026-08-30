@@ -66,6 +66,12 @@ void MixBus::updateEqIfNeeded()
     }
 }
 
+double MixBus::delayBeatsForNote(int note) noexcept
+{
+    const int i = juce::jlimit(0, kDelayNoteCount - 1, note);
+    return kDelayNoteBeats[(size_t) i];
+}
+
 void MixBus::applyStemGain(juce::AudioBuffer<float>& buf, float vol, float left, float right)
 {
     const int n = buf.getNumSamples();
@@ -103,13 +109,14 @@ void MixBus::process(juce::AudioBuffer<float>& io)
 
     if (d > 0.005f)
     {
+        const double beats = delayBeatsForNote(delayNote.load());
         const float delaySamp = (float) juce::jlimit(
             64.0,
             (double) delayL.getMaximumDelayInSamples() - 4.0,
-            (60.0 / juce::jmax(40.0, bpm.load())) * kDelayBeats * sampleRate);
+            (60.0 / juce::jmax(40.0, bpm.load())) * beats * sampleRate);
         delayL.setDelay(delaySamp);
         delayR.setDelay(delaySamp);
-        const float fb = kDelayFeedback;
+        const float fb = juce::jlimit(0.0f, 0.85f, delayFeedback.load());
         float* L = io.getWritePointer(0);
         float* R = ch > 1 ? io.getWritePointer(1) : nullptr;
         for (int i = 0; i < n; ++i)
@@ -142,4 +149,5 @@ void MixBus::process(juce::AudioBuffer<float>& io)
     const float master = juce::jlimit(0.0f, 2.0f, masterVol.load());
     if (std::abs(master - 1.0f) > 0.001f)
         io.applyGain(master);
+}
 }

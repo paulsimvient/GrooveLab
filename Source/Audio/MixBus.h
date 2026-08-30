@@ -29,8 +29,12 @@ public:
     std::atomic<float> busComp { 0.22f };
     std::atomic<float> busDelay { 0.0f };
     std::atomic<float> masterVol { 1.0f };
-    static constexpr float kDelayFeedback = 0.38f;
-    static constexpr double kDelayBeats = 0.5; // 1/8 note at current BPM
+    std::atomic<float> delayFeedback { 0.38f };
+    std::atomic<int> delayNote { 2 };
+    static constexpr int kDelayNoteCount = 5;
+    static constexpr double kDelayNoteBeats[kDelayNoteCount] = { 1.0, 0.75, 0.5, 1.0 / 3.0, 0.25 };
+    static constexpr const char* kDelayNoteNames[kDelayNoteCount] = { "1/4", "1/8D", "1/8", "1/8T", "1/16" };
+    static double delayBeatsForNote(int note) noexcept;
     std::array<std::atomic<float>, kEqBands> eqGainDb {};
 
     static void applyStemGain(juce::AudioBuffer<float>&, float vol, float left, float right);

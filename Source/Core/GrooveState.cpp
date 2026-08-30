@@ -437,6 +437,8 @@ juce::var GrooveState::toVar() const
         m->setProperty("busComp", mix.busComp);
         m->setProperty("busDelay", mix.busDelay);
         m->setProperty("masterVol", mix.masterVol);
+        m->setProperty("delayFeedback", mix.delayFeedback);
+        m->setProperty("delayNote", mix.delayNote);
         juce::Array<juce::var> eq;
         for (int i = 0; i < kEqBands; ++i)
             eq.add(mix.eqGainDb[(size_t) i]);
@@ -445,6 +447,8 @@ juce::var GrooveState::toVar() const
     }
     root->setProperty("soundMode", soundMode);
     root->setProperty("bpm", bpm);
+    root->setProperty("recordQuantize", recordQuantize);
+    root->setProperty("recordQuantizeNote", recordQuantizeNote);
     root->setProperty("meter", (int) meter);
     root->setProperty("meterTransform", (int) meterTransform);
     root->setProperty("selectedTrack", selectedTrack);
@@ -528,6 +532,11 @@ bool GrooveState::fromVar(const juce::var& v)
 
     auto bpmVar = root->getProperty("bpm");
     if (!bpmVar.isVoid()) bpm = (double)bpmVar;
+    auto quantVar = root->getProperty("recordQuantize");
+    if (! quantVar.isVoid()) recordQuantize = (bool) quantVar;
+    auto quantNoteVar = root->getProperty("recordQuantizeNote");
+    if (! quantNoteVar.isVoid())
+        recordQuantizeNote = juce::jlimit(0, kQuantizeNoteCount - 1, (int) quantNoteVar);
     auto meterVar = root->getProperty("meter");
     if (!meterVar.isVoid())
         meter = (Meter) juce::jlimit(0, kMeterCount - 1, (int) meterVar);
@@ -588,6 +597,9 @@ bool GrooveState::fromVar(const juce::var& v)
         mix.busComp = take(m->getProperty("busComp"), 0.22f, 0.0f, 1.0f);
         mix.busDelay = take(m->getProperty("busDelay"), 0.0f, 0.0f, 1.0f);
         mix.masterVol = take(m->getProperty("masterVol"), 1.0f, 0.0f, 1.5f);
+        mix.delayFeedback = take(m->getProperty("delayFeedback"), 0.38f, 0.0f, 0.85f);
+        mix.delayNote = juce::jlimit(0, 4, m->getProperty("delayNote").isVoid()
+                                        ? 2 : (int) m->getProperty("delayNote"));
         if (auto* eq = m->getProperty("eq").getArray())
         {
             for (int i = 0; i < juce::jmin(kEqBands, eq->size()); ++i)

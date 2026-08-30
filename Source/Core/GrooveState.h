@@ -27,6 +27,8 @@ public:
     MixSettings mix;
     int soundMode = 2;
     double bpm = 124.0;
+    bool recordQuantize = true;
+    int recordQuantizeNote = kDefaultQuantizeNote;
     Meter meter = Meter::fourFour;
     MeterTransform meterTransform = MeterTransform::reflow;
     int selectedTrack = 0;

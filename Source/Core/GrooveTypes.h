@@ -404,10 +404,36 @@ struct MixSettings
     float busComp = 0.22f;
     float busDelay = 0.0f;
     float masterVol = 1.0f;
+    float delayFeedback = 0.38f;
+    int delayNote = 2; // 1/8 — see MixBus::kDelayNoteNames
     std::array<float, kEqBands> eqGainDb {};
 };
 
 inline constexpr int kMaxTakes = 12;
+
+inline constexpr int kQuantizeNoteCount = 5;
+inline constexpr int kDefaultQuantizeNote = 2; // 1/8
+inline constexpr const char* kQuantizeNoteNames[kQuantizeNoteCount] = {
+    "1/2", "1/4", "1/8", "1/16", "1/32"
+};
+
+// Sequencer step is a 16th at 1x. 1/32 is the finest available (same as 1/16).
+inline int quantizeGridSteps(int quantizeNote)
+{
+    static constexpr int grids[] = { 8, 4, 2, 1, 1 };
+    return grids[juce::jlimit(0, kQuantizeNoteCount - 1, quantizeNote)];
+}
+
+inline int snapStepToGrid(int step, int grid, int length)
+{
+    length = juce::jmax(1, length);
+    grid = juce::jmax(1, grid);
+    step = ((step % length) + length) % length;
+    if (grid <= 1)
+        return step;
+    const int nearest = ((step + grid / 2) / grid) * grid;
+    return nearest >= length ? 0 : nearest;
+}
 
 struct Song
 {

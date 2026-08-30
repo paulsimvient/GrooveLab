@@ -21,11 +21,12 @@ MixStrip::MixStrip()
     keysVolL.setText("VOL", juce::dontSendNotification);
     keysLL.setText("L", juce::dontSendNotification);
     keysRL.setText("R", juce::dontSendNotification);
-    masterL.setText("MST", juce::dontSendNotification);
+    masterL.setText("MASTER", juce::dontSendNotification);
     compL.setText("CMP", juce::dontSendNotification);
-    delayL.setText("DLY", juce::dontSendNotification);
-    delayInfo.setText("1/8 ping-pong  ·  off", juce::dontSendNotification);
-    delayInfo.setMinimumHorizontalScale(0.7f);
+    delayL.setText("WET", juce::dontSendNotification);
+    delayFbL.setText("FB", juce::dontSendNotification);
+    delayInfo.setText("1/8  ·  ping-pong  ·  off", juce::dontSendNotification);
+    delayInfo.setMinimumHorizontalScale(0.65f);
     eqTitle.setText("EQ", juce::dontSendNotification);
 
     for (auto* l : { &drumsTitle, &synthTitle, &polyTitle, &keysTitle, &busTitle })
@@ -43,7 +44,7 @@ MixStrip::MixStrip()
     refreshChannelHighlight();
     for (auto* l : { &drumVolL, &drumLL, &drumRL, &synthVolL, &synthLL, &synthRL,
                      &polyVolL, &polyLL, &polyRL, &keysVolL, &keysLL, &keysRL,
-                     &masterL, &compL, &delayL, &delayInfo, &eqTitle })
+                     &masterL, &compL, &delayL, &delayFbL, &delayInfo, &eqTitle })
     {
         l->setFont(juce::FontOptions(10.0f, juce::Font::bold));
         l->setColour(juce::Label::textColourId, juce::Colour(0xffe6f0f5));
@@ -65,8 +66,47 @@ MixStrip::MixStrip()
     configure(keysLeft, 0.0, 1.5, 0.01);
     configure(keysRight, 0.0, 1.5, 0.01);
     configure(masterVol, 0.0, 1.5, 0.01);
+    masterVol.setSliderStyle(juce::Slider::LinearVertical);
+    masterVol.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 56, 16);
+    masterVol.setColour(juce::Slider::trackColourId, juce::Colour(0xff2a4a5c));
+    masterVol.setColour(juce::Slider::thumbColourId, juce::Colour(0xff7ac8ff));
+    masterVol.textFromValueFunction = [](double v)
+    {
+        if (v <= 0.001)
+            return juce::String("-inf");
+        return juce::String(juce::Decibels::gainToDecibels((float) v), 1) + " dB";
+    };
+    masterVol.valueFromTextFunction = [](const juce::String& t)
+    {
+        auto s = t.upToFirstOccurrenceOf("dB", false, true).trim();
+        if (s.containsIgnoreCase("inf"))
+            return 0.0;
+        return (double) juce::Decibels::decibelsToGain(s.getFloatValue());
+    };
     configure(busComp, 0.0, 1.0, 0.01);
     configure(busDelay, 0.0, 1.0, 0.01);
+    busDelay.textFromValueFunction = [](double v)
+    {
+        return juce::String(juce::roundToInt(v * 100.0)) + "%";
+    };
+    busDelay.valueFromTextFunction = [](const juce::String& t)
+    {
+        return juce::jlimit(0.0, 1.0, t.upToFirstOccurrenceOf("%", false, false).getDoubleValue() / 100.0);
+    };
+    delayFeedback.setRange(0.0, 0.85, 0.01);
+    delayFeedback.setSliderStyle(juce::Slider::LinearHorizontal);
+    delayFeedback.setTextBoxStyle(juce::Slider::TextBoxRight, false, 40, 14);
+    delayFeedback.setColour(juce::Slider::trackColourId, juce::Colour(0xff2a4a5c));
+    delayFeedback.setColour(juce::Slider::thumbColourId, juce::Colour(0xff7ac8ff));
+    delayFeedback.textFromValueFunction = [](double v)
+    {
+        return juce::String(juce::roundToInt(v * 100.0)) + "%";
+    };
+    delayFeedback.valueFromTextFunction = [](const juce::String& t)
+    {
+        return juce::jlimit(0.0, 0.85, t.upToFirstOccurrenceOf("%", false, false).getDoubleValue() / 100.0);
+    };
+    addAndMakeVisible(delayFeedback);
 
     drumVol.setValue(1.0, juce::dontSendNotification);
     drumLeft.setValue(1.0, juce::dontSendNotification);
@@ -83,6 +123,7 @@ MixStrip::MixStrip()
     masterVol.setValue(1.0, juce::dontSendNotification);
     busComp.setValue(0.22, juce::dontSendNotification);
     busDelay.setValue(0.0, juce::dontSendNotification);
+    delayFeedback.setValue(0.38, juce::dontSendNotification);
 
     for (int i = 0; i < groove::kEqBands; ++i)
     {
@@ -97,9 +138,9 @@ MixStrip::MixStrip()
 
     for (auto* s : { &drumVol, &drumLeft, &drumRight, &synthVol, &synthLeft, &synthRight,
                      &polyVol, &polyLeft, &polyRight, &keysVol, &keysLeft, &keysRight,
-                     &masterVol, &busComp, &busDelay })
+                     &masterVol, &busComp, &busDelay, &delayFeedback })
         bind(*s);
-    busDelay.onValueChange = [this]
+    auto notifyDelay = [this]
     {
         refreshDelayInfo();
         if (refreshing)
@@ -107,9 +148,21 @@ MixStrip::MixStrip()
         if (onChanged)
             onChanged();
     };
+    busDelay.onValueChange = notifyDelay;
+    delayFeedback.onValueChange = notifyDelay;
+    for (int i = 0; i < groove::MixBus::kDelayNoteCount; ++i)
+    {
+        auto& b = delayNotes[(size_t) i];
+        b.setButtonText(groove::MixBus::kDelayNoteNames[i]);
+        b.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1a3a4e));
+        b.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        b.onClick = [this, i] { selectDelayNote(i); };
+        addAndMakeVisible(b);
+    }
     delayInfo.setFont(juce::FontOptions(9.0f, juce::Font::bold));
     delayInfo.setColour(juce::Label::textColourId, juce::Colour(0xff8aa0ae));
     delayInfo.setJustificationType(juce::Justification::centred);
+    refreshDelayNotes();
     refreshDelayInfo();
 
     stylePicker(drumSound, drumPrev, drumNext);
@@ -118,10 +171,11 @@ MixStrip::MixStrip()
     stylePicker(keysSound, keysPrev, keysNext);
     drumSound.setTextWhenNothingSelected("DRUM SOUND");
     synthSound.setTextWhenNothingSelected("MOOG SOUND");
-    polySound.setTextWhenNothingSelected("PROPHET SOUND");
     keysSound.setTextWhenNothingSelected("KEYS SOUND");
+    polySound.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff0c1822));
+    polySound.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffc5d8e4));
 
-    for (auto* b : { &drumUi, &synthUi, &polyUi, &keysUi })
+    for (auto* b : { &drumUi, &synthUi, &polyUi, &keysUi, &polyBrowse })
     {
         b->setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1a3a4e));
         b->setColour(juce::TextButton::textColourOffId, juce::Colours::white);
@@ -132,6 +186,17 @@ MixStrip::MixStrip()
 void MixStrip::stylePicker(juce::ComboBox& box, juce::TextButton& prev, juce::TextButton& next)
 {
     box.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(box);
+    prev.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1a3a4e));
+    next.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1a3a4e));
+    prev.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    next.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    addAndMakeVisible(prev);
+    addAndMakeVisible(next);
+}
+
+void MixStrip::stylePicker(juce::TextButton& box, juce::TextButton& prev, juce::TextButton& next)
+{
     addAndMakeVisible(box);
     prev.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1a3a4e));
     next.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1a3a4e));
@@ -189,6 +254,9 @@ void MixStrip::loadFrom(const groove::MixSettings& m)
     masterVol.setValue(m.masterVol, juce::dontSendNotification);
     busComp.setValue(m.busComp, juce::dontSendNotification);
     busDelay.setValue(m.busDelay, juce::dontSendNotification);
+    delayFeedback.setValue(m.delayFeedback, juce::dontSendNotification);
+    delayNote = juce::jlimit(0, groove::MixBus::kDelayNoteCount - 1, m.delayNote);
+    refreshDelayNotes();
     refreshDelayInfo();
     for (int i = 0; i < groove::kEqBands; ++i)
         eqSliders[(size_t) i].setValue(m.eqGainDb[(size_t) i], juce::dontSendNotification);
@@ -211,6 +279,8 @@ void MixStrip::saveTo(groove::MixSettings& m) const
     m.masterVol = (float) masterVol.getValue();
     m.busComp = (float) busComp.getValue();
     m.busDelay = (float) busDelay.getValue();
+    m.delayFeedback = (float) delayFeedback.getValue();
+    m.delayNote = delayNote;
     for (int i = 0; i < groove::kEqBands; ++i)
         m.eqGainDb[(size_t) i] = (float) eqSliders[(size_t) i].getValue();
 }
@@ -246,19 +316,43 @@ void MixStrip::setBpm(double bpm)
     refreshDelayInfo();
 }
 
+void MixStrip::refreshDelayNotes()
+{
+    for (int i = 0; i < groove::MixBus::kDelayNoteCount; ++i)
+    {
+        const bool on = delayNote == i;
+        delayNotes[(size_t) i].setColour(juce::TextButton::buttonColourId,
+                                         on ? juce::Colour(0xff2a6a88) : juce::Colour(0xff1a3a4e));
+        delayNotes[(size_t) i].setColour(juce::TextButton::textColourOffId,
+                                         on ? juce::Colour(0xffe8f6ff) : juce::Colours::white);
+    }
+}
+
+void MixStrip::selectDelayNote(int index)
+{
+    delayNote = juce::jlimit(0, groove::MixBus::kDelayNoteCount - 1, index);
+    refreshDelayNotes();
+    refreshDelayInfo();
+    if (refreshing)
+        return;
+    if (onChanged)
+        onChanged();
+}
+
 void MixStrip::refreshDelayInfo()
 {
+    const int note = juce::jlimit(0, groove::MixBus::kDelayNoteCount - 1, delayNote);
+    const auto name = juce::String(groove::MixBus::kDelayNoteNames[note]);
+    const double beats = groove::MixBus::delayBeatsForNote(note);
+    const int ms = juce::roundToInt((60000.0 / juce::jmax(40.0, currentBpm)) * beats);
     const int wet = juce::roundToInt(busDelay.getValue() * 100.0);
-    const int ms = juce::roundToInt((60000.0 / juce::jmax(40.0, currentBpm))
-                                    * groove::MixBus::kDelayBeats);
-    const int fb = juce::roundToInt(groove::MixBus::kDelayFeedback * 100.0f);
+    const int fb = juce::roundToInt(delayFeedback.getValue() * 100.0);
+    juce::String text = name + "  ·  ping-pong  ·  " + juce::String(ms) + " ms";
     if (wet <= 0)
-        delayInfo.setText("1/8 ping-pong  ·  " + juce::String(ms) + " ms  ·  off",
-                          juce::dontSendNotification);
+        text += "\noff  ·  FB " + juce::String(fb) + "%";
     else
-        delayInfo.setText("1/8 ping-pong  ·  " + juce::String(ms) + " ms\nFB "
-                              + juce::String(fb) + "%  ·  " + juce::String(wet) + "% wet",
-                          juce::dontSendNotification);
+        text += "\nFB " + juce::String(fb) + "%  ·  " + juce::String(wet) + "% wet";
+    delayInfo.setText(text, juce::dontSendNotification);
 }
 
 void MixStrip::paint(juce::Graphics& g)
@@ -311,13 +405,15 @@ void MixStrip::resized()
     auto placeCol = [&](juce::Label& title, juce::Label& aL, juce::Slider& a,
                         juce::Label& bL, juce::Slider& b,
                         juce::Label& cL, juce::Slider& c,
-                        juce::ComboBox* box, juce::TextButton* prev, juce::TextButton* next,
+                        juce::Component* box, juce::TextButton* prev, juce::TextButton* next,
                         juce::TextButton* ui)
     {
         auto col = r.removeFromLeft(colW).reduced(4, 2);
         auto titleRow = col.removeFromTop(16);
         if (ui != nullptr)
-            ui->setBounds(titleRow.removeFromRight(64).reduced(1));
+            ui->setBounds(titleRow.removeFromRight(52).reduced(1));
+        if (&title == &polyTitle)
+            polyBrowse.setBounds(titleRow.removeFromRight(40).reduced(1));
         title.setBounds(titleRow);
         if (box != nullptr && prev != nullptr && next != nullptr)
         {
@@ -352,17 +448,30 @@ void MixStrip::resized()
 
     auto bus = r.removeFromLeft(colW).reduced(4, 2);
     busTitle.setBounds(bus.removeFromTop(16));
-    auto fx = bus.removeFromTop(juce::jmax(58, bus.getHeight() / 3));
-    const int knobW = juce::jmax(32, fx.getWidth() / 3);
+
+    auto masterCol = bus.removeFromLeft(juce::jmax(56, bus.getWidth() / 4));
+    masterL.setBounds(masterCol.removeFromTop(14));
+    masterVol.setBounds(masterCol);
+
+    auto fx = bus.removeFromTop(juce::jmax(52, bus.getHeight() / 3));
+    const int knobW = juce::jmax(36, fx.getWidth() / 2);
     auto placeBusKnob = [&](juce::Label& lab, juce::Slider& sl)
     {
         auto cell = fx.removeFromLeft(knobW);
         lab.setBounds(cell.removeFromTop(14));
         sl.setBounds(cell);
     };
-    placeBusKnob(masterL, masterVol);
     placeBusKnob(compL, busComp);
     placeBusKnob(delayL, busDelay);
+
+    auto noteRow = bus.removeFromTop(20);
+    const int noteW = juce::jmax(22, noteRow.getWidth() / groove::MixBus::kDelayNoteCount);
+    for (int i = 0; i < groove::MixBus::kDelayNoteCount; ++i)
+        delayNotes[(size_t) i].setBounds(noteRow.removeFromLeft(noteW).reduced(1, 1));
+
+    auto fbRow = bus.removeFromTop(18);
+    delayFbL.setBounds(fbRow.removeFromLeft(18));
+    delayFeedback.setBounds(fbRow.reduced(0, 1));
     delayInfo.setBounds(bus.removeFromTop(28));
 
     eqTitle.setBounds(bus.removeFromTop(12));

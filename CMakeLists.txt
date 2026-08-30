@@ -56,6 +56,8 @@ target_sources(GrooveLab PRIVATE
     Source/UI/SynthKeyboard.cpp
     Source/UI/EvolutionLab.h
     Source/UI/EvolutionLab.cpp
+    Source/UI/PatchBrowser.h
+    Source/UI/PatchBrowser.cpp
     Source/UI/MainComponent.h
     Source/UI/MainComponent.cpp
     Source/Standalone/Main.cpp

@@ -69,6 +69,8 @@ private:
     juce::TextButton duplicateButton { "DUPLICATE" };
     juce::TextButton deleteButton { "DELETE" };
     juce::TextButton recButton { "REC" };
+    juce::TextButton quantizeButton { "QUANTIZE" };
+    juce::ComboBox quantizeBox;
     static constexpr int kLaneLabelW = 118;
     struct LaneHit : public juce::Component
     {
