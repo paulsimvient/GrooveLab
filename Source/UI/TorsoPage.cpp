@@ -69,10 +69,15 @@ TorsoPage::TorsoPage(groove::GrooveEngine& e)
     division.addItem("2x", 4);
     division.addItem("4x", 5);
 
+    rhythmMode.addItem("STEP", 1);
+    rhythmMode.addItem("EUCLID", 2);
+    rhythmMode.addItem("HYBRID", 3);
+
     addAndMakeVisible(steps);
     addAndMakeVisible(pulses);
     addAndMakeVisible(rotate);
     addAndMakeVisible(division);
+    addAndMakeVisible(rhythmMode);
     addAndMakeVisible(velocity);
     addAndMakeVisible(kitNote);
     addAndMakeVisible(probability);
@@ -119,6 +124,16 @@ void TorsoPage::bindGeneratorKnobs()
         engine.setTrackDivision(engine.state().selectedTrack,
                                 d[juce::jlimit(1, 5, division.getSelectedId()) - 1]);
         if (onPatternChanged) onPatternChanged();
+    };
+
+    rhythmMode.onChange = [this]
+    {
+        if (refreshing) return;
+        const int id = juce::jlimit(1, 3, rhythmMode.getSelectedId());
+        engine.setTrackRhythmMode(engine.state().selectedTrack, (groove::RhythmMode) (id - 1));
+        refreshFromEngine();
+        if (onPatternChanged) onPatternChanged();
+        repaint();
     };
 }
 
@@ -188,9 +203,21 @@ void TorsoPage::commitGenerator()
 {
     if (refreshing) return;
     const int t = engine.state().selectedTrack;
+
+    // Editing Euclidean shape controls means the user is actively using the
+    // Euclidean generator. Promote STEP -> EUCLID automatically. Preserve
+    // HYBRID because it may contain explicit per-step overrides.
+    const auto mode = engine.state().tracks[(size_t) t].rhythmMode;
+    if (mode == groove::RhythmMode::step)
+        engine.setTrackRhythmMode(t, groove::RhythmMode::euclid);
+
     engine.setTrackSteps(t, (int) steps.getValue());
     engine.setTrackPulses(t, (int) pulses.getValue());
     engine.setTrackRotate(t, (int) rotate.getValue());
+
+    // Keep the mode selector visually synchronized immediately.
+    rhythmMode.setSelectedId((int) engine.state().tracks[(size_t) t].rhythmMode + 1,
+                             juce::dontSendNotification);
     repaint();
     if (onPatternChanged) onPatternChanged();
 }
@@ -211,6 +238,7 @@ void TorsoPage::refreshFromEngine()
     const int did = tr.division < 0.375f ? 1 : tr.division < 0.75f ? 2
                   : tr.division < 1.5f ? 3 : tr.division < 3.0f ? 4 : 5;
     division.setSelectedId(did, juce::dontSendNotification);
+    rhythmMode.setSelectedId((int) tr.rhythmMode + 1, juce::dontSendNotification);
 
     velocity.setValue(step.velocity, juce::dontSendNotification);
     kitNote.setSelectedId(engine.effectiveMidiNote(st.selectedTrack, st.selectedStep) + 1,
@@ -279,12 +307,14 @@ void TorsoPage::resized()
     pulsePanel = bounds;
 
     auto s = shapePanel.reduced(16);
-    s.removeFromTop(40);
+    s.removeFromTop(34);
+    rhythmMode.setBounds(s.getX() + 8, s.getY(), s.getWidth() - 16, 26);
+    s.removeFromTop(34);
     const int kn = s.getWidth() / 2;
-    steps.setBounds(s.getX(), s.getY(), kn, 110);
-    pulses.setBounds(s.getX() + kn, s.getY(), kn, 110);
-    rotate.setBounds(s.getX(), s.getY() + 118, kn, 110);
-    division.setBounds(s.getX() + kn + 8, s.getY() + 140, kn - 16, 28);
+    steps.setBounds(s.getX(), s.getY(), kn, 92);
+    pulses.setBounds(s.getX() + kn, s.getY(), kn, 92);
+    rotate.setBounds(s.getX(), s.getY() + 96, kn, 92);
+    division.setBounds(s.getX() + kn + 8, s.getY() + 118, kn - 16, 28);
 
     auto sp = stepPanel.reduced(14);
     sp.removeFromTop(38);
@@ -329,7 +359,7 @@ void TorsoPage::paint(juce::Graphics& g)
     const auto& tr = st.tracks[t];
     const int play = engine.currentStepForTrack(t);
 
-    panel(shapePanel, "SHAPE");
+    panel(shapePanel, "SHAPE  ·  PER SOUND");
     panel(pulsePanel, "GRID  ·  CLICK ON / OFF  ·  SHIFT SELECT");
     panel(stepPanel, "STEP " + juce::String(st.selectedStep + 1) + "  ·  " + groove::voiceName(t)
                       + "  ·  NOTE " + groove::ujamKitName(engine.effectiveMidiNote(t, st.selectedStep))
@@ -338,12 +368,13 @@ void TorsoPage::paint(juce::Graphics& g)
 
     g.setColour(juce::Colour(0xff8a7a68));
     g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
-    g.drawText("STEPS", shapePanel.getX() + 22, shapePanel.getY() + 36, 70, 14, juce::Justification::centredLeft);
+    g.drawText("MODE", shapePanel.getX() + 22, shapePanel.getY() + 34, 70, 14, juce::Justification::centredLeft);
+    g.drawText("STEPS", shapePanel.getX() + 22, shapePanel.getY() + 72, 70, 14, juce::Justification::centredLeft);
     g.drawText("PULSES", shapePanel.getX() + 22 + shapePanel.getWidth() / 2 - 16,
-               shapePanel.getY() + 36, 70, 14, juce::Justification::centredLeft);
-    g.drawText("ROTATE", shapePanel.getX() + 22, shapePanel.getY() + 154, 70, 14, juce::Justification::centredLeft);
+               shapePanel.getY() + 72, 70, 14, juce::Justification::centredLeft);
+    g.drawText("ROTATE", shapePanel.getX() + 22, shapePanel.getY() + 168, 70, 14, juce::Justification::centredLeft);
     g.drawText("DIVISION", shapePanel.getX() + 22 + shapePanel.getWidth() / 2 - 16,
-               shapePanel.getY() + 154, 80, 14, juce::Justification::centredLeft);
+               shapePanel.getY() + 168, 80, 14, juce::Justification::centredLeft);
 
     auto labelRow = stepPanel.reduced(14).removeFromTop(38);
     labelRow.removeFromLeft(4);
@@ -360,7 +391,10 @@ void TorsoPage::paint(juce::Graphics& g)
 
     g.setColour(juce::Colour(0xffffc38a));
     g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-    g.drawText(groove::voiceName(t) + "  ·  " + juce::String(tr.pulses) + "/" + juce::String(tr.generatorSteps)
+    const char* modeName = tr.rhythmMode == groove::RhythmMode::step ? "STEP"
+                         : tr.rhythmMode == groove::RhythmMode::euclid ? "EUCLID" : "HYBRID";
+    g.drawText(groove::voiceName(t) + "  ·  " + modeName + "  ·  "
+               + juce::String(tr.pulses) + "/" + juce::String(tr.generatorSteps)
                + "  rot " + juce::String(tr.rotate),
                pulsePanel.reduced(16, 12).removeFromTop(28),
                juce::Justification::centredLeft);
@@ -370,7 +404,8 @@ void TorsoPage::paint(juce::Graphics& g)
         auto pad = pulsePad(step).toFloat();
         const auto& ss = tr.steps[step];
         const bool outside = step >= tr.generatorSteps;
-        const bool gen = ! outside && engine.isGeneratedHit(t, step);
+        const bool generatorActive = tr.rhythmMode != groove::RhythmMode::step;
+        const bool gen = generatorActive && ! outside && engine.isGeneratedHit(t, step);
         const bool resolved = ! outside && engine.isResolvedHit(t, step);
         const bool selected = (step == st.selectedStep);
         const bool playing = (step == play);
@@ -497,12 +532,26 @@ void TorsoPage::mouseDown(const juce::MouseEvent& e)
             continue;
 
         const int t = engine.state().selectedTrack;
-        const auto& tr = engine.state().tracks[t];
-        const bool outside = step >= tr.generatorSteps;
-        const bool currentlyOn = ! outside && engine.isResolvedHit(t, step);
+        const auto& tr = engine.state().tracks[(size_t) t];
+        const bool pureEuclid = tr.rhythmMode == groove::RhythmMode::euclid;
         engine.selectStep(t, step);
-        if (! e.mods.isShiftDown())
+
+        // Pure EUCLID remains an editable *generator*: single-click selects a
+        // step for velocity/probability/Param Locks without altering the
+        // generated rhythm. Double-click explicitly changes placement, which
+        // promotes the track to HYBRID in GrooveEngine::toggleStep().
+        if (pureEuclid)
+        {
+            if (e.getNumberOfClicks() >= 2)
+                engine.toggleStep(t, step);
+        }
+        else if (! e.mods.isShiftDown())
+        {
+            const bool outside = step >= tr.generatorSteps;
+            const bool currentlyOn = ! outside && engine.isResolvedHit(t, step);
             engine.setPulseEnabled(t, step, ! currentlyOn);
+        }
+
         engine.auditionSelected();
         refreshFromEngine();
         if (onPatternChanged) onPatternChanged();

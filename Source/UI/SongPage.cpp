@@ -334,6 +334,37 @@ int SongPage::midiLaneAt(juce::Point<int> pos) const
     return lane;
 }
 
+int SongPage::midiStepAt(juce::Point<int> pos, int lane) const
+{
+    if (lane < 0 || lane >= groove::kMidiLanes)
+        return -1;
+    auto r = lanesPanel.reduced(16, 0);
+    r.removeFromTop(34);
+    const int rowH = juce::jmax(18, r.getHeight() / groove::kMidiLanes);
+    auto row = r.removeFromTop(rowH * (lane + 1)).removeFromBottom(rowH).reduced(0, 1);
+    row.removeFromLeft(kLaneLabelW);
+    const auto& srcLanes = engine.state().midiLanes;
+    if (! srcLanes[(size_t) lane].patches.empty())
+        row.removeFromRight(90);
+    auto dots = row.reduced(6, 5);
+    if (! dots.contains(pos) || dots.getWidth() <= 0)
+        return -1;
+    const int step = (int) ((pos.x - dots.getX()) * groove::kSteps / (float) dots.getWidth());
+    return juce::jlimit(0, groove::kSteps - 1, step);
+}
+
+bool SongPage::deleteSelectedNote()
+{
+    if (selectedLane < 0 || selectedLaneStep < 0)
+        return false;
+    engine.deleteLaneNotesAt(selectedLane, selectedLaneStep);
+    selectedLane = -1;
+    selectedLaneStep = -1;
+    refreshFromEngine();
+    if (onSongChanged) onSongChanged();
+    return true;
+}
+
 void SongPage::expandOrContractBars(int index, bool expand)
 {
     const auto& sections = engine.state().song.sections;
@@ -593,7 +624,20 @@ void SongPage::mouseDown(const juce::MouseEvent& e)
         if (onChannelClicked)
             onChannelClicked(ch);
         if (openUi && onInstrumentUiClicked)
+        {
             onInstrumentUiClicked(ch);
+            return;
+        }
+        const int step = midiStepAt(e.getPosition(), lane);
+        if (step >= 0)
+        {
+            selectedLane = lane;
+            selectedLaneStep = step;
+            if (e.mods.isPopupMenu() || e.mods.isRightButtonDown() || e.mods.isAltDown())
+                deleteSelectedNote();
+            else
+                repaint();
+        }
         return;
     }
 
@@ -904,7 +948,7 @@ void SongPage::paint(juce::Graphics& g)
     juce::String arrangeTitle = "ARRANGEMENT  ·  CLICK TO CUE  ·  SHIFT-CLICK JUMPS ON BEAT";
     panel(g, arrangePanel, arrangeTitle);
     const int recLane = groove::midiLaneIndexForChannel(activeMidiChannel);
-    juce::String lanesTitle = "MIDI LANES";
+    juce::String lanesTitle = "MIDI LANES  ·  CLICK A NOTE  ·  RIGHT-CLICK OR DELETE REMOVES IT";
     if (recLane >= 0)
     {
         lanesTitle += "  ·  CH" + juce::String(activeMidiChannel)

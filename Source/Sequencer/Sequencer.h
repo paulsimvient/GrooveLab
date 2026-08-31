@@ -14,6 +14,8 @@ public:
         VoiceParams params {};
         int ratchet = 1;
         int sampleOffset = 0;
+        int midiNote = 36;
+        float division = 1.0f;
     };
 
     void prepare(double sampleRate);
@@ -41,9 +43,89 @@ public:
         const int steps = juce::jlimit(1, kSteps, tr.generatorSteps);
         const int local = step % steps;
         const auto& st = tr.steps[local];
+
+        if (tr.rhythmMode == RhythmMode::step)
+            return st.overrideMode == StepOverrideMode::forceOn || st.active;
+
+        const bool generated = euclideanHit(local, steps, tr.pulses, tr.rotate);
+        if (tr.rhythmMode == RhythmMode::euclid)
+            return generated;
+
+        // HYBRID: generator underneath, explicit step edits on top.
         if (st.overrideMode == StepOverrideMode::forceOn) return true;
         if (st.overrideMode == StepOverrideMode::forceOff) return false;
-        return euclideanHit(local, steps, tr.pulses, tr.rotate);
+        return generated;
+    }
+
+
+    static VoiceParams effectiveParams(const Track& tr, int step)
+    {
+        auto p = tr.base;
+        const auto& L = tr.steps[(size_t) step].locks;
+        if (L[(int) Param::pitch])     p.pitchHz   = *L[(int) Param::pitch];
+        if (L[(int) Param::decay])     p.decayMs   = *L[(int) Param::decay];
+        if (L[(int) Param::transient]) p.transient = *L[(int) Param::transient];
+        if (L[(int) Param::noise])     p.noise     = *L[(int) Param::noise];
+        if (L[(int) Param::filter])    p.filter    = *L[(int) Param::filter];
+        if (L[(int) Param::drive])     p.drive     = *L[(int) Param::drive];
+        if (L[(int) Param::space])     p.space     = *L[(int) Param::space];
+        if (L[(int) Param::blend])     p.blend     = *L[(int) Param::blend];
+        return p;
+    }
+
+    static int effectiveMidiNote(const Track& tr, int step, int trackIndex)
+    {
+        const auto& st = tr.steps[(size_t) step];
+        if (st.midiNote.has_value() && *st.midiNote >= 0 && *st.midiNote <= 127)
+            return *st.midiNote;
+        if (tr.midiNote >= 0 && tr.midiNote <= 127)
+            return tr.midiNote;
+        static constexpr int defaults[kTracks] = { 36, 38, 39, 42, 46, 45, 47, 49 };
+        return defaults[juce::jlimit(0, kTracks - 1, trackIndex)];
+    }
+
+    static bool trackIsAudible(const std::array<Track, kTracks>& tracks, int track)
+    {
+        bool anySolo = false;
+        for (const auto& tr : tracks)
+            anySolo = anySolo || tr.soloed;
+        return anySolo ? tracks[(size_t) track].soloed : ! tracks[(size_t) track].muted;
+    }
+
+    template <typename Fn>
+    void processBlock(const std::array<Track, kTracks>& tracks, int numSamples, Fn&& onTrigger)
+    {
+        for (int i = 0; i < numSamples; ++i)
+        {
+            for (int t = 0; t < kTracks; ++t)
+            {
+                auto& clock = trackClocks[(size_t) t];
+                if (--clock.samplesUntilNextStep <= 0.0)
+                {
+                    const auto& tr = tracks[(size_t) t];
+                    const int length = juce::jlimit(1, kSteps, tr.generatorSteps);
+                    const int step = clock.nextStep % length;
+                    const auto& st = tr.steps[(size_t) step];
+                    clock.lastStep = step;
+
+                    const float probability = juce::jlimit(0.0f, 1.0f,
+                        st.probability * tr.probability);
+                    if (trackIsAudible(tracks, t) && resolvedStepActive(tr, step)
+                        && random.nextFloat() <= probability)
+                    {
+                        const int reps = juce::jlimit(1, 4, st.ratchet);
+                        const float vel = juce::jlimit(0.0f, 1.2f, st.velocity * tr.velocity);
+                        onTrigger(Trigger { t, step, vel, effectiveParams(tr, step), reps, i,
+                                            effectiveMidiNote(tr, step, t), tr.division });
+                    }
+
+                    clock.nextStep = (clock.nextStep + 1) % length;
+                    const double division = juce::jlimit(0.25, 4.0, (double) tr.division);
+                    clock.samplesUntilNextStep += samplesPerStep / division;
+                }
+            }
+            ++globalSampleCounter;
+        }
     }
 
     template <typename Fn>

@@ -55,7 +55,9 @@ private:
 
     static constexpr int maxVoices = 48;
     std::array<ActiveVoice, maxVoices> voices {};
-    std::vector<PendingTrigger> pending;
+    static constexpr int maxPendingTriggers = 64;
+    std::array<PendingTrigger, maxPendingTriggers> pending {};
+    int pendingCount = 0;
 
     std::vector<float> roomL, roomR;
     int roomIndex = 0;

@@ -10,7 +10,7 @@ void DrumSynth::prepare(double sampleRate, int)
     for (auto& v : voices)
         v = {};
 
-    pending.clear();
+    pendingCount = 0;
 
     // Small stereo feedback room. Deliberately simple and portable.
     const int roomSamples = juce::jmax(1024, (int) (sr * 0.23));
@@ -93,13 +93,13 @@ void DrumSynth::triggerRatchet(int voice,
         return;
 
     const int spacing = juce::jmax(1, stepSamples / repeats);
-    for (int r = 1; r < repeats; ++r)
-        pending.push_back(PendingTrigger {
+    for (int r = 1; r < repeats && pendingCount < maxPendingTriggers; ++r)
+        pending[(size_t) pendingCount++] = PendingTrigger {
             spacing * r,
             voice,
             params,
             velocity * (1.0f - 0.08f * (float) r)
-        });
+        };
 }
 
 float DrumSynth::renderVoiceSample(ActiveVoice& v)
@@ -257,16 +257,18 @@ void DrumSynth::render(juce::AudioBuffer<float>& buffer)
 
     for (int i = 0; i < n; ++i)
     {
-        for (auto it = pending.begin(); it != pending.end(); )
+        for (int p = 0; p < pendingCount; )
         {
-            if (--it->samplesRemaining <= 0)
+            auto& event = pending[(size_t) p];
+            if (--event.samplesRemaining <= 0)
             {
-                trigger(it->voice, it->params, it->velocity);
-                it = pending.erase(it);
+                trigger(event.voice, event.params, event.velocity);
+                pending[(size_t) p] = pending[(size_t) (pendingCount - 1)];
+                --pendingCount;
             }
             else
             {
-                ++it;
+                ++p;
             }
         }
 

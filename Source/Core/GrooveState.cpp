@@ -283,22 +283,22 @@ PatternTake takeFromVar(const juce::var& v)
 
 GrooveState::GrooveState()
 {
-    // Musical starting point is generator data, not a hard-coded step pattern.
-    const int defaultPulses[kTracks] = {4, 2, 2, 11, 3, 5, 3, 1};
-    const int defaultRotate[kTracks] = {0, 4, 12, 0, 3, 1, 5, 14};
-    const int defaultSteps[kTracks]  = {16,16,16,16,16,16,16,16};
-
+    // Start as a blank musical canvas.  Instrument defaults stay initialized so
+    // every voice is immediately playable, but no rhythm, MIDI, arrangement,
+    // take, or parameter-lock data is pre-populated.
     for (int i = 0; i < kTracks; ++i)
     {
         tracks[i].base = defaultsFor(i);
-        tracks[i].generatorSteps = defaultSteps[i];
-        tracks[i].pulses = defaultPulses[i];
-        tracks[i].rotate = defaultRotate[i];
+        tracks[i].rhythmMode = RhythmMode::step;
+        tracks[i].generatorSteps = 16;
+        tracks[i].pulses = 0;
+        tracks[i].rotate = 0;
         tracks[i].division = 1.0f;
-        tracks[i].probability = 0.96f;
+        tracks[i].probability = 1.0f;
+        tracks[i].velocity = 1.0f;
         tracks[i].midiNote = midiNoteForTrack(i);
     }
-    seedDefaultSong();
+    clearSong();
 }
 
 VoiceParams GrooveState::effectiveParams(int t, int s) const
@@ -339,6 +339,32 @@ bool GrooveState::trackIsAudible(int track) const
     if (anySolo)
         return tracks[track].soloed;
     return ! tracks[track].muted;
+}
+
+void GrooveState::clearSong()
+{
+    song = {};
+    song.follow = false;
+    song.current = 0;
+    midiLanes = makeDefaultMidiLanes();
+
+    for (auto& track : tracks)
+    {
+        track.rhythmMode = RhythmMode::step;
+        track.generatorSteps = 16;
+        track.pulses = 0;
+        track.rotate = 0;
+        track.division = 1.0f;
+        track.probability = 1.0f;
+        track.velocity = 1.0f;
+        track.muted = false;
+        track.soloed = false;
+
+        for (auto& step : track.steps)
+        {
+            step = Step{};
+        }
+    }
 }
 
 void GrooveState::seedDefaultSong()
@@ -406,7 +432,7 @@ void GrooveState::clearAllLocks(int t, int s)
 juce::var GrooveState::toVar() const
 {
     auto* root = new juce::DynamicObject();
-    root->setProperty("formatVersion", 11);
+    root->setProperty("formatVersion", 13);
     root->setProperty("name", name);
     root->setProperty("lastPluginPath", lastPluginPath);
     root->setProperty("lastPluginProgram", lastPluginProgram);
@@ -435,14 +461,77 @@ juce::var GrooveState::toVar() const
         m->setProperty("polyLeft", mix.polyLeft);
         m->setProperty("polyRight", mix.polyRight);
         m->setProperty("busComp", mix.busComp);
-        m->setProperty("busDelay", mix.busDelay);
         m->setProperty("masterVol", mix.masterVol);
-        m->setProperty("delayFeedback", mix.delayFeedback);
-        m->setProperty("delayNote", mix.delayNote);
         juce::Array<juce::var> eq;
         for (int i = 0; i < kEqBands; ++i)
             eq.add(mix.eqGainDb[(size_t) i]);
         m->setProperty("eq", eq);
+        juce::Array<juce::var> fxArr;
+        for (int c = 0; c < kMixChannels; ++c)
+        {
+            auto* fx = new juce::DynamicObject();
+            const auto& ch = mix.channelFx[(size_t) c];
+            fx->setProperty("lpOn", ch.lpOn);
+            fx->setProperty("lp", ch.lp);
+            fx->setProperty("hpOn", ch.hpOn);
+            fx->setProperty("hp", ch.hp);
+            fx->setProperty("delayOn", ch.delayOn);
+            fx->setProperty("delayWet", ch.delayWet);
+            fx->setProperty("delayFb", ch.delayFb);
+            fx->setProperty("delayNote", ch.delayNote);
+            fx->setProperty("reverbOn", ch.reverbOn);
+            fx->setProperty("reverbSize", ch.reverbSize);
+            fx->setProperty("reverbDecay", ch.reverbDecay);
+            fx->setProperty("reverbWet", ch.reverbWet);
+            fx->setProperty("reverbPreDelay", ch.reverbPreDelay);
+            fx->setProperty("reverbWidth", ch.reverbWidth);
+            fx->setProperty("reverbBass", ch.reverbBass);
+            fx->setProperty("reverbMid", ch.reverbMid);
+            fx->setProperty("reverbTreble", ch.reverbTreble);
+            fx->setProperty("reverbVolume", ch.reverbVolume);
+            fx->setProperty("paradiseOn", ch.paradiseOn);
+            fx->setProperty("paradiseInput", ch.paradiseInput);
+            fx->setProperty("paradiseGate", ch.paradiseGate);
+            fx->setProperty("paradisePre", ch.paradisePre);
+            fx->setProperty("paradiseAmp", ch.paradiseAmp);
+            fx->setProperty("paradiseCab", ch.paradiseCab);
+            fx->setProperty("paradiseRoom", ch.paradiseRoom);
+            fx->setProperty("paradiseOutput", ch.paradiseOutput);
+            fx->setProperty("paradiseLimit", ch.paradiseLimit);
+            fx->setProperty("driveOn", ch.driveOn); fx->setProperty("driveAmount", ch.driveAmount); fx->setProperty("driveTone", ch.driveTone); fx->setProperty("driveMix", ch.driveMix);
+            fx->setProperty("ringOn", ch.ringOn); fx->setProperty("ringFreq", ch.ringFreq); fx->setProperty("ringDepth", ch.ringDepth); fx->setProperty("ringMix", ch.ringMix);
+            fx->setProperty("combOn", ch.combOn); fx->setProperty("combFreq", ch.combFreq); fx->setProperty("combFeedback", ch.combFeedback); fx->setProperty("combMix", ch.combMix);
+            juce::Array<juce::var> locks;
+            for (int s = 0; s < kSteps; ++s)
+            {
+                const auto& lock = mix.fxLocks[(size_t) c][(size_t) s];
+                if (lock.empty())
+                    continue;
+                auto* lo = new juce::DynamicObject();
+                lo->setProperty("step", s);
+                if (lock.lp.has_value()) lo->setProperty("lp", *lock.lp);
+                if (lock.hp.has_value()) lo->setProperty("hp", *lock.hp);
+                if (lock.delayWet.has_value()) lo->setProperty("delayWet", *lock.delayWet);
+                if (lock.delayFeedback.has_value()) lo->setProperty("delayFeedback", *lock.delayFeedback);
+                if (lock.delayNote.has_value()) lo->setProperty("delayNote", *lock.delayNote);
+                if (lock.reverbSize.has_value()) lo->setProperty("reverbSize", *lock.reverbSize);
+                if (lock.reverbDecay.has_value()) lo->setProperty("reverbDecay", *lock.reverbDecay);
+                if (lock.reverbWet.has_value()) lo->setProperty("reverbWet", *lock.reverbWet);
+                if (lock.driveAmount.has_value()) lo->setProperty("driveAmount", *lock.driveAmount);
+                if (lock.driveTone.has_value()) lo->setProperty("driveTone", *lock.driveTone);
+                if (lock.driveMix.has_value()) lo->setProperty("driveMix", *lock.driveMix);
+                if (lock.ringFreq.has_value()) lo->setProperty("ringFreq", *lock.ringFreq);
+                if (lock.ringDepth.has_value()) lo->setProperty("ringDepth", *lock.ringDepth);
+                if (lock.ringMix.has_value()) lo->setProperty("ringMix", *lock.ringMix);
+                if (lock.combFreq.has_value()) lo->setProperty("combFreq", *lock.combFreq);
+                if (lock.combFeedback.has_value()) lo->setProperty("combFeedback", *lock.combFeedback);
+                if (lock.combMix.has_value()) lo->setProperty("combMix", *lock.combMix);
+                locks.add(juce::var(lo));
+            }
+            fx->setProperty("locks", locks);
+            fxArr.add(juce::var(fx));
+        }
+        m->setProperty("channelFx", fxArr);
         root->setProperty("mix", juce::var(m));
     }
     root->setProperty("soundMode", soundMode);
@@ -472,6 +561,7 @@ juce::var GrooveState::toVar() const
         tr->setProperty("space", p.space);
         tr->setProperty("blend", p.blend);
 
+        tr->setProperty("rhythmMode", (int) track.rhythmMode);
         tr->setProperty("generatorSteps", track.generatorSteps);
         tr->setProperty("pulses", track.pulses);
         tr->setProperty("rotate", track.rotate);
@@ -595,15 +685,97 @@ bool GrooveState::fromVar(const juce::var& v)
         mix.polyLeft = take(m->getProperty("polyLeft"), 1.0f, 0.0f, 1.5f);
         mix.polyRight = take(m->getProperty("polyRight"), 1.0f, 0.0f, 1.5f);
         mix.busComp = take(m->getProperty("busComp"), 0.22f, 0.0f, 1.0f);
-        mix.busDelay = take(m->getProperty("busDelay"), 0.0f, 0.0f, 1.0f);
         mix.masterVol = take(m->getProperty("masterVol"), 1.0f, 0.0f, 1.5f);
-        mix.delayFeedback = take(m->getProperty("delayFeedback"), 0.38f, 0.0f, 0.85f);
-        mix.delayNote = juce::jlimit(0, 4, m->getProperty("delayNote").isVoid()
-                                        ? 2 : (int) m->getProperty("delayNote"));
         if (auto* eq = m->getProperty("eq").getArray())
         {
             for (int i = 0; i < juce::jmin(kEqBands, eq->size()); ++i)
                 mix.eqGainDb[(size_t) i] = juce::jlimit(-12.0f, 12.0f, (float) eq->getUnchecked(i));
+        }
+        mix.channelFx = {};
+        mix.fxLocks = {};
+        if (auto* fxArr = m->getProperty("channelFx").getArray())
+        {
+            for (int c = 0; c < juce::jmin(kMixChannels, fxArr->size()); ++c)
+            {
+                auto* fx = fxArr->getUnchecked(c).getDynamicObject();
+                if (fx == nullptr)
+                    continue;
+                auto& ch = mix.channelFx[(size_t) c];
+                ch.lpOn = (bool) fx->getProperty("lpOn");
+                ch.lp = take(fx->getProperty("lp"), 1.0f, 0.0f, 1.0f);
+                ch.hpOn = (bool) fx->getProperty("hpOn");
+                ch.hp = take(fx->getProperty("hp"), 0.0f, 0.0f, 1.0f);
+                ch.delayOn = (bool) fx->getProperty("delayOn");
+                ch.delayWet = take(fx->getProperty("delayWet"), 0.22f, 0.0f, 1.0f);
+                ch.delayFb = take(fx->getProperty("delayFb"), 0.32f, 0.0f, 0.85f);
+                ch.delayNote = juce::jlimit(0, kDelayNoteCount - 1,
+                    fx->getProperty("delayNote").isVoid() ? 2 : (int) fx->getProperty("delayNote"));
+                ch.reverbOn = !fx->getProperty("reverbOn").isVoid() && (bool)fx->getProperty("reverbOn");
+                ch.reverbSize = take(fx->getProperty("reverbSize"), 0.45f, 0.0f, 1.0f);
+                ch.reverbDecay = take(fx->getProperty("reverbDecay"), 0.55f, 0.0f, 1.0f);
+                ch.reverbWet = take(fx->getProperty("reverbWet"), 0.38f, 0.0f, 1.0f);
+                ch.reverbPreDelay = take(fx->getProperty("reverbPreDelay"), 0.12f, 0.0f, 1.0f);
+                ch.reverbWidth = take(fx->getProperty("reverbWidth"), 0.75f, 0.0f, 1.0f);
+                ch.reverbBass = take(fx->getProperty("reverbBass"), 0.5f, 0.0f, 1.0f);
+                ch.reverbMid = take(fx->getProperty("reverbMid"), 0.5f, 0.0f, 1.0f);
+                ch.reverbTreble = take(fx->getProperty("reverbTreble"), 0.5f, 0.0f, 1.0f);
+                ch.reverbVolume = take(fx->getProperty("reverbVolume"), 0.85f, 0.0f, 1.0f);
+                ch.paradiseOn = ! fx->getProperty("paradiseOn").isVoid()
+                    && (bool) fx->getProperty("paradiseOn");
+                ch.paradiseInput = take(fx->getProperty("paradiseInput"), 0.70f, 0.0f, 1.0f);
+                ch.paradiseGate = take(fx->getProperty("paradiseGate"), 0.00f, 0.0f, 1.0f);
+                ch.paradisePre = take(fx->getProperty("paradisePre"), 0.70f, 0.0f, 1.0f);
+                ch.paradiseAmp = take(fx->getProperty("paradiseAmp"), 0.78f, 0.0f, 1.0f);
+                ch.paradiseCab = take(fx->getProperty("paradiseCab"), 0.80f, 0.0f, 1.0f);
+                ch.paradiseRoom = take(fx->getProperty("paradiseRoom"), 0.25f, 0.0f, 1.0f);
+                ch.paradiseOutput = take(fx->getProperty("paradiseOutput"), 0.90f, 0.0f, 1.0f);
+                ch.paradiseLimit = take(fx->getProperty("paradiseLimit"), 0.55f, 0.0f, 1.0f);
+                ch.driveOn = !fx->getProperty("driveOn").isVoid() && (bool)fx->getProperty("driveOn");
+                ch.driveAmount = take(fx->getProperty("driveAmount"), 0.25f, 0.0f, 1.0f);
+                ch.driveTone = take(fx->getProperty("driveTone"), 0.55f, 0.0f, 1.0f);
+                ch.driveMix = take(fx->getProperty("driveMix"), 1.0f, 0.0f, 1.0f);
+                ch.ringOn = !fx->getProperty("ringOn").isVoid() && (bool)fx->getProperty("ringOn");
+                ch.ringFreq = take(fx->getProperty("ringFreq"), 0.35f, 0.0f, 1.0f);
+                ch.ringDepth = take(fx->getProperty("ringDepth"), 1.0f, 0.0f, 1.0f);
+                ch.ringMix = take(fx->getProperty("ringMix"), 0.5f, 0.0f, 1.0f);
+                ch.combOn = !fx->getProperty("combOn").isVoid() && (bool)fx->getProperty("combOn");
+                ch.combFreq = take(fx->getProperty("combFreq"), 0.35f, 0.0f, 1.0f);
+                ch.combFeedback = take(fx->getProperty("combFeedback"), 0.45f, 0.0f, 0.96f);
+                ch.combMix = take(fx->getProperty("combMix"), 0.5f, 0.0f, 1.0f);
+                if (auto* locks = fx->getProperty("locks").getArray())
+                {
+                    for (const auto& item : *locks)
+                    {
+                        auto* lo = item.getDynamicObject();
+                        if (lo == nullptr)
+                            continue;
+                        const int s = juce::jlimit(0, kSteps - 1, (int) lo->getProperty("step"));
+                        auto& lock = mix.fxLocks[(size_t) c][(size_t) s];
+                        if (! lo->getProperty("lp").isVoid())
+                            lock.lp = take(lo->getProperty("lp"), 1.0f, 0.0f, 1.0f);
+                        if (! lo->getProperty("hp").isVoid())
+                            lock.hp = take(lo->getProperty("hp"), 0.0f, 0.0f, 1.0f);
+                        if (! lo->getProperty("delayWet").isVoid())
+                            lock.delayWet = take(lo->getProperty("delayWet"), 0.22f, 0.0f, 1.0f);
+                        if (! lo->getProperty("delayFeedback").isVoid())
+                            lock.delayFeedback = take(lo->getProperty("delayFeedback"), 0.32f, 0.0f, 0.85f);
+                        if (! lo->getProperty("delayNote").isVoid())
+                            lock.delayNote = juce::jlimit(0, kDelayNoteCount - 1, (int) lo->getProperty("delayNote"));
+                        if (! lo->getProperty("reverbSize").isVoid()) lock.reverbSize = take(lo->getProperty("reverbSize"), 0.45f, 0.0f, 1.0f);
+                        if (! lo->getProperty("reverbDecay").isVoid()) lock.reverbDecay = take(lo->getProperty("reverbDecay"), 0.50f, 0.0f, 1.0f);
+                        if (! lo->getProperty("reverbWet").isVoid()) lock.reverbWet = take(lo->getProperty("reverbWet"), 0.18f, 0.0f, 1.0f);
+                        if (!lo->getProperty("driveAmount").isVoid()) lock.driveAmount = take(lo->getProperty("driveAmount"), 0.25f, 0.0f, 1.0f);
+                        if (!lo->getProperty("driveTone").isVoid()) lock.driveTone = take(lo->getProperty("driveTone"), 0.55f, 0.0f, 1.0f);
+                        if (!lo->getProperty("driveMix").isVoid()) lock.driveMix = take(lo->getProperty("driveMix"), 1.0f, 0.0f, 1.0f);
+                        if (!lo->getProperty("ringFreq").isVoid()) lock.ringFreq = take(lo->getProperty("ringFreq"), 0.35f, 0.0f, 1.0f);
+                        if (!lo->getProperty("ringDepth").isVoid()) lock.ringDepth = take(lo->getProperty("ringDepth"), 1.0f, 0.0f, 1.0f);
+                        if (!lo->getProperty("ringMix").isVoid()) lock.ringMix = take(lo->getProperty("ringMix"), 0.5f, 0.0f, 1.0f);
+                        if (!lo->getProperty("combFreq").isVoid()) lock.combFreq = take(lo->getProperty("combFreq"), 0.35f, 0.0f, 1.0f);
+                        if (!lo->getProperty("combFeedback").isVoid()) lock.combFeedback = take(lo->getProperty("combFeedback"), 0.45f, 0.0f, 0.96f);
+                        if (!lo->getProperty("combMix").isVoid()) lock.combMix = take(lo->getProperty("combMix"), 0.5f, 0.0f, 1.0f);
+                    }
+                }
+            }
         }
     }
     auto modeVar = root->getProperty("soundMode");
@@ -640,6 +812,12 @@ bool GrooveState::fromVar(const juce::var& v)
         track.base.drive = readFloat("drive", track.base.drive);
         track.base.space = readFloat("space", track.base.space);
         track.base.blend = readFloat("blend", track.base.blend);
+
+        auto rhythmModeVar = tr->getProperty("rhythmMode");
+        if (!rhythmModeVar.isVoid())
+            track.rhythmMode = (RhythmMode) juce::jlimit(0, 2, (int) rhythmModeVar);
+        else
+            track.rhythmMode = RhythmMode::hybrid;
 
         // v0.6 fields; fall back to v0.5 length/rate when loading older files.
         auto gs = tr->getProperty("generatorSteps");
@@ -722,7 +900,7 @@ bool GrooveState::fromVar(const juce::var& v)
     auto* songObj = root->getProperty("song").getDynamicObject();
     if (songObj == nullptr)
     {
-        seedDefaultSong();
+        clearSong();
         return true;
     }
 
@@ -783,7 +961,7 @@ bool GrooveState::fromVar(const juce::var& v)
         }
     }
     if (song.sections.empty())
-        seedDefaultSong();
+        clearSong();
     else
         applySongSection(song.current);
 

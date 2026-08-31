@@ -39,6 +39,7 @@ private:
     juce::Slider pulses;
     juce::Slider rotate;
     juce::ComboBox division;
+    juce::ComboBox rhythmMode;
 
     juce::Slider velocity;
     juce::ComboBox kitNote;

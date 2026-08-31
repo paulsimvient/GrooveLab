@@ -21,6 +21,7 @@ public:
     void refreshFromEngine();
     void setActiveMidiChannel(int channel);
     int sectionIndexAt(juce::Point<int> pos) const;
+    bool deleteSelectedNote();
 
     std::function<void()> onSongChanged;
     std::function<void(int channel)> onChannelClicked;
@@ -48,6 +49,7 @@ private:
     juce::Rectangle<int> sectionResizeHandle(int index) const;
     juce::Rectangle<int> sectionDeleteArea(int index) const;
     int midiLaneAt(juce::Point<int> pos) const;
+    int midiStepAt(juce::Point<int> pos, int lane) const;
     void rebuildTakeButtons();
     void expandOrContractBars(int index, bool expand);
 
@@ -93,6 +95,8 @@ private:
     std::array<TrackRow, groove::kTracks> rows;
     juce::Rectangle<int> arrangePanel, lanesPanel, editPanel;
     int activeMidiChannel = 2;
+    int selectedLane = -1;
+    int selectedLaneStep = -1;
     bool refreshing = false;
     int dragFrom = -1;
     int dragInsert = -1;

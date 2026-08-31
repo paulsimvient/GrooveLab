@@ -1,0 +1,33 @@
+Lil God Projector / GrooveLab v1.0 OPTIMIZED REBUILD
+
+Core real-time work
+- Audio engine no longer blocks on the project/UI CriticalSection. It uses a fixed-size realtime track snapshot and tryEnter() for mutable project/song state.
+- Sequencer has an allocation-free realtime track-array processing path.
+- Pending MIDI and lane MIDI are pre-reserved and compacted in place rather than rebuilding temporary vectors every audio block.
+- Drum ratchet scheduler uses a fixed 64-event array instead of vector push/erase inside the per-sample render loop.
+- Plugin host preallocates plugin audio, mix scratch and MIDI scratch buffers in prepare().
+- Plugin host never resizes buffers in process().
+- Plugin process uses a non-blocking plugin lock; editor/plugin-load contention skips a block instead of stalling the audio callback.
+- Main audio callback reuses preallocated MIDI scratch buffers and stem buffers.
+- Release CMake builds enable -O3 and release interprocedural optimization.
+
+Behavior retained/fixed
+- Starts with an empty musical project; no autosave is silently restored at startup.
+- NEW GROOVE also starts empty.
+- RESET remains transport-only.
+- Per-sound STEP / EUCLID / HYBRID rhythm modes remain.
+- Song-timeline MIDI recording remains.
+- Param locks remain, including mixer/filter/delay/creative FX locks.
+- Drive/Saturation, Ring Mod and Comb Filter remain accessible via mixer FX dropdowns.
+- UJAM/multi-output drum instruments now keep their native output buses instead of forcing a generic stereo layout that could expose only Kick.
+- External keyboard follows the selected UI instrument channel by default (CH2 initially), rather than blindly following incoming CH1.
+
+Instrument preferences
+- Current requested instruments remain factory fallback defaults.
+- Choose replacement VST3/AU instruments using the existing Sound/mixer loading controls.
+- Preferences now includes “USE CURRENT INSTRUMENTS AS DEFAULTS”.
+- Saved defaults are applied to a new empty project/startup, while a loaded project still restores its own saved plugin paths.
+
+Build notes
+- build_mac.command performs a clean Release build against JUCE 8.0.4 and launches the exact newly-built app bundle.
+- This environment could not fetch JUCE from GitHub, so the complete macOS/Xcode compiler pass must run on the target Mac via build_mac.command.

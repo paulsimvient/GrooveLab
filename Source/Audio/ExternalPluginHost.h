@@ -50,6 +50,12 @@ public:
 
     // replace=true overwrites io with plugin audio; false mixes plugin into io.
     void process(juce::AudioBuffer<float>& io, juce::MidiBuffer& midi, bool replace);
+    // wetAmount: 0 = dry only, 1 = fully replaced by plugin output (host-side blend).
+    void processEffect(juce::AudioBuffer<float>& io, float wetAmount = 1.0f);
+
+    // Set a hosted effect parameter by human-readable name fragments.
+    // Returns false when the plug-in exposes no matching parameter.
+    bool setParameterByName(const juce::StringArray& nameFragments, float normalizedValue);
 
 private:
     class EditorWindow;
@@ -88,6 +94,8 @@ private:
     double sampleRate = 44100.0;
     int blockSize = 512;
     juce::AudioBuffer<float> pluginBuffer;
+    juce::AudioBuffer<float> mixScratch;
+    juce::MidiBuffer midiScratch;
     juce::File pluginFile;
     std::vector<PatchEntry> patches;
     int currentPatch = 0;

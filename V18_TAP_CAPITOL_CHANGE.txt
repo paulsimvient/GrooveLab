@@ -1,0 +1,5 @@
+v1.8
+- Press T repeatedly or click TAP to set tempo. Recent valid tap intervals are averaged; a >2s pause starts a new tap sequence.
+- Removed visible Choose/Assign Instrument menu entries and Default Instruments preferences UI.
+- Reverb now auto-detects Capitol Chambers in standard macOS AU/VST3 locations and instantiates it per channel.
+- Built-in JUCE channel reverb processing is bypassed when using this hosted-reverb architecture.

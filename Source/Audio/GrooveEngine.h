@@ -38,6 +38,15 @@ public:
     void setLockFromBase(int track, int step, Param p);
     void clearLock(int track, int step, Param p);
     void clearAllLocks(int track, int step);
+    void toggleParamLock(int track, int step, Param p);
+    void deleteNote(int track, int step);
+    void deleteLaneNotesAt(int lane, int step);
+    void setTrackRhythmMode(int track, RhythmMode mode);
+    int midiTimelineSteps() const;
+    int currentMidiTimelineStep() const;
+    int addMidiLaneNote(int lane, int step, int note, float velocity, int lengthSteps);
+    bool deleteMidiLaneNote(int lane, int noteIndex);
+    void updateMidiLaneNote(int lane, int noteIndex, const MidiLaneNote& note);
     void setVelocity(int track, int step, float value);
     void setProbability(int track, int step, float value);
     void setRatchet(int track, int step, int repeats);
@@ -102,6 +111,7 @@ public:
     void setMeter(Meter meter);
     void setMeterTransform(MeterTransform transform);
     void setSongFollow(bool shouldFollow);
+    void adoptSong(Song song);
     int songBarInSection() const;
     double songSectionProgress() const;
 
@@ -116,6 +126,16 @@ public:
     void removeTake(int index);
     void deleteCurrentTake();
     void pushIncomingMidi(const juce::MidiMessage&);
+    struct PerformanceEvent
+    {
+        int track = -1;
+        int note = 0;
+        float velocity = 1.0f;
+        int step = 0;
+    };
+    void setPerformanceTap(bool on);
+    bool isPerformanceTapOn() const noexcept { return performanceTap.load(); }
+    void drainPerformanceTap(std::vector<PerformanceEvent>& dest);
     void recordLanePatch(int lane, const juce::String& name, int kitIndex);
     struct PendingPatchApply { int lane = 0; juce::String name; int kitIndex = 0; };
     void drainPendingPatches(std::vector<PendingPatchApply>& dest);
@@ -196,9 +216,12 @@ private:
     std::atomic<int> pendingBeatJump { -1 };
     std::atomic<bool> playing { false };
     std::atomic<bool> recording { false };
+    std::atomic<bool> performanceTap { false };
     bool followBeforeRecord = true;
     std::vector<IncomingHit> incomingHits;
     juce::CriticalSection incomingLock;
+    std::vector<PerformanceEvent> tapEvents;
+    juce::CriticalSection tapLock;
     juce::MidiBuffer laneMidiBlock;
     std::vector<PendingMidi> pendingLaneMidi;
     int lastLaneStep = -1;

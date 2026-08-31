@@ -57,18 +57,18 @@ ExternalPluginHost::~ExternalPluginHost()
 
 void ExternalPluginHost::configureBuses(juce::AudioPluginInstance& inst)
 {
-    // UJAM Virtual Drummer / Beatmaker expose Kick, Snare, OH, Room, etc.
-    // Forcing a 2-channel layout often leaves only the Kick bus live.
-    juce::AudioProcessor::BusesLayout stereoOnly;
-    stereoOnly.inputBuses = inst.getBusesLayout().inputBuses;
-    stereoOnly.outputBuses.add(juce::AudioChannelSet::stereo());
-    if (inst.setBusesLayout(stereoOnly))
+    // Multi-output drum instruments (notably UJAM) may expose Kick, Snare, OH,
+    // Room, Main/Mix, etc. Forcing a generic stereo layout can accidentally bind
+    // the host to the first stem (often Kick). Preserve the plugin's native buses.
+    inst.enableAllBuses();
+
+    if (inst.getBusCount(false) <= 1)
     {
+        if (auto* bus = inst.getBus(false, 0))
+            bus->enable(true);
         captureSnareBus(inst);
         return;
     }
-
-    inst.enableAllBuses();
 
     int mixBus = -1;
     for (int i = 0; i < inst.getBusCount(false); ++i)
@@ -91,11 +91,10 @@ void ExternalPluginHost::configureBuses(juce::AudioPluginInstance& inst)
         for (int i = 0; i < inst.getBusCount(false); ++i)
             if (auto* bus = inst.getBus(false, i))
                 bus->enable(i == mixBus);
-        captureSnareBus(inst);
-        return;
     }
+    // If there is no obvious main bus, leave all native outputs enabled and let
+    // mixToStereo() fold them into the app's stereo stem.
 
-    // Last resort: keep every bus and fold them in process().
     captureSnareBus(inst);
 }
 
@@ -137,6 +136,9 @@ void ExternalPluginHost::prepare(double sr, int bs)
     {
         pluginBuffer.setSize(2, blockSize, false, false, true);
     }
+    mixScratch.setSize(2, blockSize, false, false, true);
+    midiScratch.clear();
+    midiScratch.ensureSize(32768);
 }
 
 void ExternalPluginHost::release()
@@ -201,6 +203,71 @@ bool ExternalPluginHost::loadFromFile(const juce::File& file, juce::String& erro
 
     scanUjamPatches();
     error.clear();
+    return true;
+}
+
+
+bool ExternalPluginHost::setParameterByName(const juce::StringArray& nameFragments, float normalizedValue)
+{
+    const juce::ScopedLock sl(pluginLock);
+    if (plugin == nullptr || nameFragments.isEmpty())
+        return false;
+
+    juce::AudioProcessorParameter* best = nullptr;
+    int bestScore = -1;
+    bool wantsOutput = false;
+    for (const auto& raw : nameFragments)
+    {
+        const auto t = raw.toLowerCase();
+        if (t == "output" || t == "out" || t == "volume" || t == "vol" || t == "level")
+            wantsOutput = true;
+    }
+
+    for (auto* p : plugin->getParameters())
+    {
+        if (p == nullptr)
+            continue;
+
+        const auto name = p->getName(128).toLowerCase();
+        int score = 0;
+        bool matched = false;
+
+        for (const auto& raw : nameFragments)
+        {
+            const auto token = raw.toLowerCase();
+            if (token.isEmpty())
+                continue;
+
+            if (name == token) { score += 120; matched = true; }
+            else if (name.startsWith(token) || name.endsWith(token)) { score += 40; matched = true; }
+            else if (name.contains(token)) { score += 20; matched = true; }
+        }
+
+        // Prefer dedicated volume/output names when asked for them.
+        if (wantsOutput)
+        {
+            if (name == "output" || name == "out" || name == "volume" || name == "vol")
+                score += 80;
+            else if (name.contains("output") || name.contains("volume"))
+                score += 30;
+        }
+        else if (name.contains("output") || name.contains("master"))
+        {
+            // Avoid common output/master parameters when searching for effect mix.
+            score -= 15;
+        }
+
+        if (matched && score > bestScore)
+        {
+            bestScore = score;
+            best = p;
+        }
+    }
+
+    if (best == nullptr)
+        return false;
+
+    best->setValueNotifyingHost(juce::jlimit(0.0f, 1.0f, normalizedValue));
     return true;
 }
 
@@ -1427,7 +1494,16 @@ void ExternalPluginHost::mixToStereo(juce::AudioBuffer<float>& dest, const juce:
 
 void ExternalPluginHost::process(juce::AudioBuffer<float>& io, juce::MidiBuffer& midi, bool replace)
 {
-    const juce::ScopedLock sl(pluginLock);
+    // Plugin load/editor operations may briefly own pluginLock. The audio thread
+    // must never wait for them; skip one block instead of risking a dropout.
+    if (! pluginLock.tryEnter())
+        return;
+    struct UnlockOnExit
+    {
+        juce::CriticalSection& lock;
+        ~UnlockOnExit() { lock.exit(); }
+    } unlock { pluginLock };
+
     if (plugin == nullptr)
         return;
 
@@ -1436,27 +1512,29 @@ void ExternalPluginHost::process(juce::AudioBuffer<float>& io, juce::MidiBuffer&
 
     const int n = io.getNumSamples();
     const int outCh = juce::jmax(2, plugin->getTotalNumOutputChannels());
-    if (pluginBuffer.getNumSamples() < n || pluginBuffer.getNumChannels() < outCh)
-        pluginBuffer.setSize(outCh, juce::jmax(n, blockSize), false, false, true);
+    // prepare() owns allocation. If a host unexpectedly asks for a larger block,
+    // fail silent for this block instead of allocating on the real-time thread.
+    if (n > pluginBuffer.getNumSamples() || outCh > pluginBuffer.getNumChannels())
+        return;
 
     juce::AudioBuffer<float> block(pluginBuffer.getArrayOfWritePointers(),
                                    pluginBuffer.getNumChannels(), n);
     block.clear();
     // Each host has its own buffer. UAD instruments listen on Omni / CH1,
     // so stamp this instance's channel here — not the app's routing channel.
-    juce::MidiBuffer midiCopy;
+    midiScratch.clear();
     const int listenCh = juce::jlimit(1, 16, pluginMidiChannel.load());
     for (const auto metadata : midi)
     {
         auto msg = metadata.getMessage();
         if (msg.getChannel() > 0)
             msg.setChannel(listenCh);
-        midiCopy.addEvent(msg, metadata.samplePosition);
+        midiScratch.addEvent(msg, metadata.samplePosition);
     }
     const int pc = pendingProgramChange.exchange(-1);
     if (pc >= 0)
-        midiCopy.addEvent(juce::MidiMessage::programChange(listenCh, juce::jlimit(0, 127, pc)), 0);
-    plugin->processBlock(block, midiCopy);
+        midiScratch.addEvent(juce::MidiMessage::programChange(listenCh, juce::jlimit(0, 127, pc)), 0);
+    plugin->processBlock(block, midiScratch);
 
     if (replace)
     {
@@ -1464,10 +1542,66 @@ void ExternalPluginHost::process(juce::AudioBuffer<float>& io, juce::MidiBuffer&
     }
     else
     {
-        juce::AudioBuffer<float> mixed(io.getNumChannels(), n);
+        if (n > mixScratch.getNumSamples())
+            return;
+        juce::AudioBuffer<float> mixed(mixScratch.getArrayOfWritePointers(), 2, n);
+        mixed.clear();
         mixToStereo(mixed, block);
         for (int ch = 0; ch < io.getNumChannels(); ++ch)
-            io.addFrom(ch, 0, mixed, ch, 0, n);
+            io.addFrom(ch, 0, mixed, juce::jmin(ch, 1), 0, n);
     }
 }
+void ExternalPluginHost::processEffect(juce::AudioBuffer<float>& io, float wetAmount)
+{
+    if (! pluginLock.tryEnter())
+        return;
+    struct UnlockOnExit { juce::CriticalSection& lock; ~UnlockOnExit() { lock.exit(); } } unlock { pluginLock };
+    if (plugin == nullptr)
+        return;
+    if (plugin->isSuspended())
+        plugin->suspendProcessing(false);
+
+    const int n = io.getNumSamples();
+    const int channels = juce::jmax(2, plugin->getTotalNumOutputChannels());
+    if (n > pluginBuffer.getNumSamples() || channels > pluginBuffer.getNumChannels())
+        return;
+    if (n > mixScratch.getNumSamples())
+        return;
+
+    const float wet = juce::jlimit(0.0f, 1.0f, wetAmount);
+    if (wet <= 0.0001f)
+        return; // leave dry untouched
+
+    // Keep dry so WET always works even when the plugin's Mix/Wet Solo params don't map.
+    juce::AudioBuffer<float> dry(mixScratch.getArrayOfWritePointers(), 2, n);
+    dry.clear();
+    for (int ch = 0; ch < juce::jmin(2, io.getNumChannels()); ++ch)
+        dry.copyFrom(ch, 0, io, ch, 0, n);
+    if (io.getNumChannels() == 1)
+        dry.copyFrom(1, 0, io, 0, 0, n);
+
+    juce::AudioBuffer<float> block(pluginBuffer.getArrayOfWritePointers(), pluginBuffer.getNumChannels(), n);
+    block.clear();
+    for (int ch = 0; ch < juce::jmin(io.getNumChannels(), block.getNumChannels()); ++ch)
+        block.copyFrom(ch, 0, io, ch, 0, n);
+    if (io.getNumChannels() == 1 && block.getNumChannels() > 1)
+        block.copyFrom(1, 0, io, 0, 0, n);
+
+    midiScratch.clear();
+    plugin->processBlock(block, midiScratch);
+    mixToStereo(io, block);
+
+    if (wet >= 0.999f)
+        return;
+
+    const float dryG = 1.0f - wet;
+    for (int ch = 0; ch < io.getNumChannels(); ++ch)
+    {
+        auto* out = io.getWritePointer(ch);
+        const float* d = dry.getReadPointer(juce::jmin(ch, 1));
+        juce::FloatVectorOperations::multiply(out, wet, n);
+        juce::FloatVectorOperations::addWithMultiply(out, d, dryG, n);
+    }
+}
+
 }

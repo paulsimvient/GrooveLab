@@ -38,8 +38,8 @@ juce::Colour trackColour(int t)
 class AudioPreferencesPanel : public juce::Component
 {
 public:
-    explicit AudioPreferencesPanel(juce::AudioDeviceManager& dm)
-        : selector(dm, 0, 0, 2, 8, false, false, true, true)
+    AudioPreferencesPanel(juce::AudioDeviceManager& dm, std::function<void()> saveDefaults)
+        : selector(dm, 0, 0, 2, 8, false, false, true, true), saveInstrumentDefaults(std::move(saveDefaults))
     {
         heading.setText("AUDIO DEVICE", juce::dontSendNotification);
         heading.setJustificationType(juce::Justification::centredLeft);
@@ -48,10 +48,11 @@ public:
         hint.setText("Output device, sample rate, and buffer size. Saved automatically.",
                      juce::dontSendNotification);
         hint.setColour(juce::Label::textColourId, juce::Colour(0xff8aa0ae));
+
         addAndMakeVisible(heading);
         addAndMakeVisible(hint);
         addAndMakeVisible(selector);
-        setSize(560, 440);
+        setSize(620, 460);
     }
 
     void resized() override
@@ -64,20 +65,25 @@ public:
     }
 
 private:
-    juce::Label heading, hint;
+    juce::Label heading, hint, instrumentHeading, instrumentHint;
+    juce::TextButton saveDefaultsButton;
     juce::AudioDeviceSelectorComponent selector;
+    std::function<void()> saveInstrumentDefaults;
 };
 }
 
 MainComponent::MainComponent()
 {
+    addAndMakeVisible(pianoRoll);
+    pianoRoll.setVisible(false);
+
     setLookAndFeel(&look);
     setOpaque(true);
     setWantsKeyboardFocus(true);
     setFocusContainerType(juce::Component::FocusContainerType::focusContainer);
 
     projectName.setText(engine.state().name);
-    projectName.setFont(juce::FontOptions(14.0f, juce::Font::bold));
+    projectName.setFont(juce::FontOptions(12.0f, juce::Font::bold));
     projectName.setJustification(juce::Justification::centredLeft);
     projectName.setIndents(8, 0);
     projectName.setBorder({ 1, 1, 1, 1 });
@@ -98,11 +104,15 @@ MainComponent::MainComponent()
     addSmallLabel(bpmLabel, "BPM");
     bpm.setRange(40.0, 260.0, 1.0);
     bpm.setSliderStyle(juce::Slider::LinearHorizontal);
-    bpm.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 44, 24);
+    bpm.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 38, 20);
     bpm.setSliderSnapsToMousePosition(true);
     bpm.setMouseDragSensitivity(180);
     bpm.onValueChange=[this]{ if(!refreshing){ engine.state().bpm=bpm.getValue(); mixStrip.setBpm(engine.state().bpm); engine.saveAutosave(); }};
     addAndMakeVisible(bpm);
+    tapTempoButton.setTooltip("Tap tempo · press T");
+    tapTempoButton.setWantsKeyboardFocus(false);
+    tapTempoButton.onClick = [this] { tapTempo(); };
+    addAndMakeVisible(tapTempoButton);
     addSmallLabel(meterLabel, "METER");
     for (int i = 0; i < groove::kMeterCount; ++i)
         meterBox.addItem(groove::meterName((groove::Meter) i), i + 1);
@@ -128,8 +138,13 @@ MainComponent::MainComponent()
     };
     addAndMakeVisible(meterTransformBox);
 
-    for (auto* b : {&playButton,&resetButton,&captureButton,&backButton,&auditionButton,&performButton,&commitPerformButton,
-                    &clearLocks,&sparse,&syncopate,&human,&dense,&soundEvolve,&pageGridButton,&pageT1Button,&pageSongButton,&saveButton,&saveAsButton,&loadButton,&evolveButton}) addAndMakeVisible(*b);
+    for (auto* b : {&playButton,&resetButton,&auditionButton,&performButton,&commitPerformButton,
+                    &clearLocks,&deleteNote,&sparse,&syncopate,&human,&dense,&soundEvolve,
+                    &pageGridButton,&pageT1Button,&pageSongButton,&fileMenuButton,&labMenuButton})
+        addAndMakeVisible(*b);
+#if GROOVELAB_LABS_ENSEMBLE
+    addAndMakeVisible(pageEnsembleButton);
+#endif
 
     pageGridButton.setClickingTogglesState(true);
     pageT1Button.setClickingTogglesState(true);
@@ -141,6 +156,15 @@ MainComponent::MainComponent()
     pageGridButton.onClick = [this] { setPage(0); };
     pageT1Button.onClick = [this] { setPage(1); };
     pageSongButton.onClick = [this] { setPage(2); };
+#if GROOVELAB_LABS_ENSEMBLE
+    pageEnsembleButton.setClickingTogglesState(true);
+    pageEnsembleButton.setRadioGroupId(42);
+    pageEnsembleButton.onClick = [this] { setPage(3); };
+#endif
+    fileMenuButton.setTooltip("Save / Load");
+    labMenuButton.setTooltip("Capture / Evolve");
+    fileMenuButton.onClick = [this] { showFileMenu(); };
+    labMenuButton.onClick = [this] { showLabMenu(); };
     saveButton.onClick = [this] { saveCurrentGroove(); };
     saveAsButton.onClick = [this] { saveGrooveAs(); };
     loadButton.onClick = [this] { showLoadMenu(); };
@@ -178,18 +202,22 @@ MainComponent::MainComponent()
         refreshFromSelection();
         torsoPage.refreshFromEngine();
     };
+#if GROOVELAB_LABS_ENSEMBLE
+    addAndMakeVisible(ensembleView);
+    ensembleView.setVisible(false);
+#endif
 
     synthKeyboard.onNoteOn = [this](int note, float velocity)
     {
         auto msg = juce::MidiMessage::noteOn(keyboardMidiChannel(), note, velocity);
-        if (engine.isRecording())
+        if (engine.isRecording() || engine.isPerformanceTapOn())
             engine.pushIncomingMidi(msg);
         midiCollector.addMessageToQueue(msg);
     };
     synthKeyboard.onNoteOff = [this](int note)
     {
         auto msg = juce::MidiMessage::noteOff(keyboardMidiChannel(), note);
-        if (engine.isRecording())
+        if (engine.isRecording() || engine.isPerformanceTapOn())
             engine.pushIncomingMidi(msg);
         midiCollector.addMessageToQueue(msg);
     };
@@ -216,6 +244,42 @@ MainComponent::MainComponent()
     {
         mixStrip.saveTo(engine.state().mix);
         pushMixToDsp();
+
+        // Keep the exposed Capitol Chambers macros synchronized with UADx.
+        for (int c = 0; c < groove::kMixChannels; ++c)
+        {
+            auto& host = capitolReverbHosts[(size_t) c];
+            const auto& fx = engine.state().mix.channelFx[(size_t) c];
+            if (! host.isLoaded())
+                continue;
+
+            host.setParameterByName({ "chamber", "size" }, fx.reverbSize);
+            host.setParameterByName({ "decay", "time" }, fx.reverbDecay);
+            // Keep plugin 100% wet; our WET knob does the dry/wet blend in processEffect.
+            host.setParameterByName({ "wet solo", "wetsolo" }, 1.0f);
+            host.setParameterByName({ "mix", "wet" }, 1.0f);
+            host.setParameterByName({ "pre delay", "predelay", "pre-delay" }, fx.reverbPreDelay);
+            host.setParameterByName({ "width", "stereo" }, fx.reverbWidth);
+            host.setParameterByName({ "bass" }, fx.reverbBass);
+            host.setParameterByName({ "mid" }, fx.reverbMid);
+            host.setParameterByName({ "treble", "high" }, fx.reverbTreble);
+            host.setParameterByName({ "level", "volume", "vol", "output", "out" }, fx.reverbVolume);
+
+            auto& paradise = paradiseGuitarHosts[(size_t) c];
+            if (paradise.isLoaded())
+            {
+                paradise.setParameterByName({ "input", "in" }, fx.paradiseInput);
+                paradise.setParameterByName({ "gate", "threshold" }, fx.paradiseGate);
+                paradise.setParameterByName({ "pre", "pre fx", "prefx", "pre level" }, fx.paradisePre);
+                paradise.setParameterByName({ "amp", "amp level" }, fx.paradiseAmp);
+                paradise.setParameterByName({ "cab", "cab level", "cabinet" }, fx.paradiseCab);
+                paradise.setParameterByName({ "room" }, juce::jmax(0.35f, fx.paradiseRoom));
+                paradise.setParameterByName({ "mix", "wet", "blend" }, 1.0f);
+                paradise.setParameterByName({ "output", "out", "volume", "vol" }, fx.paradiseOutput);
+                paradise.setParameterByName({ "limit", "limiter" }, fx.paradiseLimit);
+            }
+        }
+
         engine.saveAutosave();
     };
     addAndMakeVisible(mixStrip);
@@ -434,10 +498,39 @@ MainComponent::MainComponent()
     clearLocks.onClick=[this]
     {
         engine.clearAllLocks(engine.state().selectedTrack,engine.state().selectedStep);
-        evolutionStatus.setText("Selected step sound reset to voice", juce::dontSendNotification);
+        evolutionStatus.setText("Step sound unlocked", juce::dontSendNotification);
         refreshFromSelection();
         repaint();
     };
+    deleteNote.onClick=[this]
+    {
+        engine.deleteNote(engine.state().selectedTrack, engine.state().selectedStep);
+        evolutionStatus.setText("Note deleted  ·  " + groove::voiceName(engine.state().selectedTrack)
+                                    + " step " + juce::String(engine.state().selectedStep + 1),
+                                juce::dontSendNotification);
+        refreshFromSelection();
+        songPage.refreshFromEngine();
+        torsoPage.refreshFromEngine();
+        repaint();
+    };
+    for (int i = 0; i < groove::paramCount; ++i)
+    {
+        auto p = parameterOrder[(size_t) i];
+        auto& b = lockChips[(size_t) i];
+        b.setButtonText(displayName(p));
+        b.setColour(juce::TextButton::textColourOffId, juce::Colour(0xffd8e8f1));
+        b.onClick = [this, p]
+        {
+            if (refreshing) return;
+            engine.toggleParamLock(engine.state().selectedTrack, engine.state().selectedStep, p);
+            evolutionStatus.setText(juce::String(displayName(p)) + " lock toggled",
+                                    juce::dontSendNotification);
+            refreshFromSelection();
+            torsoPage.refreshFromEngine();
+            repaint();
+        };
+        addAndMakeVisible(b);
+    }
     addSmallLabel(selectedLabel,"SELECTED"); selectedLabel.setFont(juce::FontOptions(13.0f,juce::Font::bold));
     addSmallLabel(evolutionStatus,"READY");
     addSmallLabel(footer,"SAVE stores this groove  ·  SAVE AS makes a named copy  ·  ⌘S save  ·  ⌘⇧S save as  ·  ⌘O load");
@@ -540,7 +633,10 @@ MainComponent::MainComponent()
         else
             autoSelectMidiInput();
     }
+    loadInstrumentDefaultsIntoState();
     applyLoadedSession();
+    tryLoadCapitolChambers();
+    tryLoadParadiseGuitarStudio();
     mixStrip.addKeyListener(this);
     mixStrip.loadFrom(engine.state().mix);
     pushMixToDsp();
@@ -557,7 +653,7 @@ MainComponent::MainComponent()
         c->addKeyListener(this);
     }
 
-    setSize(1680, 996); refreshFromSelection(); refreshVstKitUi(true); refreshSynthKitUi(true); refreshKeysKitUi(true); refreshPolyKitUi(true); startTimerHz(30);
+    setSize(1680, 1080); refreshFromSelection(); refreshVstKitUi(true); refreshSynthKitUi(true); refreshKeysKitUi(true); refreshPolyKitUi(true); startTimerHz(30);
     playButton.setButtonText(engine.isPlaying()?"STOP":"PLAY");
 #if JUCE_MAC
     extraAppleMenu.addItem(200, "Preferences...");
@@ -584,6 +680,7 @@ MainComponent::~MainComponent()
     polymaxHost.hideEditor();
     evolutionWindow.reset();
     prophetBrowser.reset();
+    instrumentBrowser.reset();
     setLookAndFeel(nullptr);
 }
 
@@ -595,12 +692,17 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
     synthHost.prepare(sampleRate, samplesPerBlockExpected);
     keysHost.prepare(sampleRate, samplesPerBlockExpected);
     polymaxHost.prepare(sampleRate, samplesPerBlockExpected);
+    for (auto& host : capitolReverbHosts) host.prepare(sampleRate, samplesPerBlockExpected);
+    for (auto& host : paradiseGuitarHosts) host.prepare(sampleRate, samplesPerBlockExpected);
     mixBus.prepare(sampleRate, samplesPerBlockExpected);
     const int n = juce::jmax(samplesPerBlockExpected, 512);
     drumStem.setSize(2, n, false, false, true);
     synthStem.setSize(2, n, false, false, true);
     keysStem.setSize(2, n, false, false, true);
     polyStem.setSize(2, n, false, false, true);
+    for (auto* midi : { &engineMidiScratch, &drumMidiScratch, &synthMidiScratch, &liveMidiScratch,
+                        &keysMidiScratch, &polyMidiScratch, &laneMidiScratch, &hardwareMidiScratch })
+        midi->ensureSize(32768);
 }
 
 void MainComponent::releaseResources()
@@ -609,6 +711,8 @@ void MainComponent::releaseResources()
     synthHost.release();
     keysHost.release();
     polymaxHost.release();
+    for (auto& host : capitolReverbHosts) host.release();
+    for (auto& host : paradiseGuitarHosts) host.release();
     mixBus.reset();
 }
 
@@ -628,11 +732,10 @@ void MainComponent::pushMixToDsp()
     mixBus.polyLeft.store(m.polyLeft);
     mixBus.polyRight.store(m.polyRight);
     mixBus.busComp.store(m.busComp);
-    mixBus.busDelay.store(m.busDelay);
     mixBus.masterVol.store(m.masterVol);
-    mixBus.delayFeedback.store(m.delayFeedback);
-    mixBus.delayNote.store(m.delayNote);
+    mixBus.pushChannelFx(m);
     mixStrip.setBpm(engine.state().bpm);
+    mixStrip.setSelectedStep(engine.state().selectedStep);
     for (int i = 0; i < groove::kEqBands; ++i)
         mixBus.eqGainDb[(size_t) i].store(m.eqGainDb[(size_t) i]);
 }
@@ -644,14 +747,13 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& info)
                                          info.startSample,
                                          info.numSamples);
     const int n = info.numSamples;
-    if (drumStem.getNumSamples() < n || drumStem.getNumChannels() < 2)
-        drumStem.setSize(2, juce::jmax(n, 512), false, false, true);
-    if (synthStem.getNumSamples() < n || synthStem.getNumChannels() < 2)
-        synthStem.setSize(2, juce::jmax(n, 512), false, false, true);
-    if (keysStem.getNumSamples() < n || keysStem.getNumChannels() < 2)
-        keysStem.setSize(2, juce::jmax(n, 512), false, false, true);
-    if (polyStem.getNumSamples() < n || polyStem.getNumChannels() < 2)
-        polyStem.setSize(2, juce::jmax(n, 512), false, false, true);
+    // All stem storage is allocated in prepareToPlay(). Never resize in the audio callback.
+    if (n > drumStem.getNumSamples() || n > synthStem.getNumSamples()
+        || n > keysStem.getNumSamples() || n > polyStem.getNumSamples())
+    {
+        view.clear();
+        return;
+    }
 
     juce::AudioBuffer<float> drums(drumStem.getArrayOfWritePointers(), 2, n);
     juce::AudioBuffer<float> synth(synthStem.getArrayOfWritePointers(), 2, n);
@@ -662,22 +764,32 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& info)
     keys.clear();
     poly.clear();
 
-    juce::MidiBuffer midi;
-    engine.process(drums, midi);
+    auto& midi = engineMidiScratch;
+    auto& drumMidi = drumMidiScratch;
+    auto& synthMidi = synthMidiScratch;
+    auto& liveMidi = liveMidiScratch;
+    auto& keysMidi = keysMidiScratch;
+    auto& polyMidi = polyMidiScratch;
+    auto& laneMidi = laneMidiScratch;
+    midi.clear(); drumMidi.clear(); synthMidi.clear(); liveMidi.clear();
+    keysMidi.clear(); polyMidi.clear(); laneMidi.clear();
 
-    juce::MidiBuffer drumMidi, synthMidi;
+    engine.process(drums, midi);
     splitDrumAndSynthMidi(midi, drumMidi, synthMidi);
-    juce::MidiBuffer liveMidi, keysMidi, polyMidi, laneMidi;
     midiCollector.removeNextBlockOfMessages(liveMidi, n);
     engine.takeLaneMidi(laneMidi);
-    routeLiveMidi(liveMidi, drumMidi, synthMidi, keysMidi, polyMidi);
-    routeLiveMidi(laneMidi, drumMidi, synthMidi, keysMidi, polyMidi);
+    // Live hardware/onscreen keyboard always follows the selected instrument slot.
+    // Song/lane MIDI keeps its recorded channel routing.
+    routeExternalMidiToSelected(liveMidi, drumMidi, synthMidi, keysMidi, polyMidi);
+    routeChannelMidi(laneMidi, drumMidi, synthMidi, keysMidi, polyMidi);
 
+    // Hardware MIDI OUT is explicit and sequencer/song-only. Never echo live
+    // controller input back to the same hardware device: that can create MIDI loops.
     if (midiOutput != nullptr)
     {
-        juce::MidiBuffer hardwareOut;
+        auto& hardwareOut = hardwareMidiScratch;
+        hardwareOut.clear();
         hardwareOut.addEvents(midi, 0, n, 0);
-        hardwareOut.addEvents(liveMidi, 0, n, 0);
         const double sr = deviceManager.getCurrentAudioDevice() != nullptr
             ? deviceManager.getCurrentAudioDevice()->getCurrentSampleRate() : 44100.0;
         midiOutput->sendBlockOfMessages(hardwareOut, juce::Time::getMillisecondCounterHiRes(), sr);
@@ -692,6 +804,55 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& info)
         keysHost.process(keys, keysMidi, true);
     if (polymaxHost.isLoaded())
         polymaxHost.process(poly, polyMidi, true);
+
+    mixBus.setPlayStep(engine.currentStep());
+    mixBus.setBpm(engine.state().bpm);
+    mixBus.processStem(0, drums);
+    mixBus.processStem(1, synth);
+    mixBus.processStem(2, poly);
+    mixBus.processStem(3, keys);
+
+    const auto& mixState = engine.state().mix;
+    auto applyFxMakeup = [](juce::AudioBuffer<float>& buf, float volumeNorm)
+    {
+        // VOL always has an audible effect even if the plugin param name differs.
+        buf.applyGain(juce::jmap(juce::jlimit(0.0f, 1.0f, volumeNorm), 0.0f, 1.0f, 0.55f, 2.4f));
+    };
+
+    if (mixBus.isReverbEnabled(0) && capitolReverbHosts[0].isLoaded())
+        capitolReverbHosts[0].processEffect(drums, mixState.channelFx[0].reverbWet);
+    if (mixBus.isReverbEnabled(1) && capitolReverbHosts[1].isLoaded())
+        capitolReverbHosts[1].processEffect(synth, mixState.channelFx[1].reverbWet);
+    if (mixBus.isReverbEnabled(2) && capitolReverbHosts[2].isLoaded())
+        capitolReverbHosts[2].processEffect(poly, mixState.channelFx[2].reverbWet);
+    if (mixBus.isReverbEnabled(3) && capitolReverbHosts[3].isLoaded())
+        capitolReverbHosts[3].processEffect(keys, mixState.channelFx[3].reverbWet);
+
+    if (mixState.channelFx[0].reverbOn) applyFxMakeup(drums, mixState.channelFx[0].reverbVolume);
+    if (mixState.channelFx[1].reverbOn) applyFxMakeup(synth, mixState.channelFx[1].reverbVolume);
+    if (mixState.channelFx[2].reverbOn) applyFxMakeup(poly, mixState.channelFx[2].reverbVolume);
+    if (mixState.channelFx[3].reverbOn) applyFxMakeup(keys, mixState.channelFx[3].reverbVolume);
+
+    if (mixState.channelFx[0].paradiseOn && paradiseGuitarHosts[0].isLoaded())
+    {
+        paradiseGuitarHosts[0].processEffect(drums, mixState.channelFx[0].paradiseRoom);
+        applyFxMakeup(drums, mixState.channelFx[0].paradiseOutput);
+    }
+    if (mixState.channelFx[1].paradiseOn && paradiseGuitarHosts[1].isLoaded())
+    {
+        paradiseGuitarHosts[1].processEffect(synth, mixState.channelFx[1].paradiseRoom);
+        applyFxMakeup(synth, mixState.channelFx[1].paradiseOutput);
+    }
+    if (mixState.channelFx[2].paradiseOn && paradiseGuitarHosts[2].isLoaded())
+    {
+        paradiseGuitarHosts[2].processEffect(poly, mixState.channelFx[2].paradiseRoom);
+        applyFxMakeup(poly, mixState.channelFx[2].paradiseOutput);
+    }
+    if (mixState.channelFx[3].paradiseOn && paradiseGuitarHosts[3].isLoaded())
+    {
+        paradiseGuitarHosts[3].processEffect(keys, mixState.channelFx[3].paradiseRoom);
+        applyFxMakeup(keys, mixState.channelFx[3].paradiseOutput);
+    }
 
     groove::MixBus::applyStemGain(drums, mixBus.drumVol.load(), mixBus.drumLeft.load(), mixBus.drumRight.load());
     groove::MixBus::applyStemGain(synth, mixBus.synthVol.load(), mixBus.synthLeft.load(), mixBus.synthRight.load());
@@ -816,40 +977,54 @@ void MainComponent::setMidiInput(int deviceIndex)
     if (midiInput != nullptr)
         midiInput->start();
     evolutionStatus.setText("MIDI IN · " + midiInDevices[deviceIndex].name
-                                + "  ·  CH1 drums  ·  CH2 moog  ·  CH3 prophet  ·  CH4 keys",
+                                + "  ·  LIVE → selected instrument",
                             juce::dontSendNotification);
 }
 
 void MainComponent::handleIncomingMidiMessage(juce::MidiInput*, const juce::MidiMessage& message)
 {
+    // Preserve the controller's note number, velocity and controller data exactly.
+    // Only the destination channel is changed so the currently selected instrument
+    // owns the live keyboard. This prevents CH1 controllers from implicitly becoming
+    // "drums" and, critically, never substitutes a fixed kick note.
+    const int sourceChannel = message.getChannel();
     juce::MidiMessage routed = message;
-    if (uiChannelLocked.load() && routed.getChannel() > 0)
+    if (sourceChannel > 0)
         routed = groove::withMidiChannel(routed, liveMidiChannel.load());
 
-    if (engine.isRecording())
+    if (engine.isRecording() || engine.isPerformanceTapOn())
         engine.pushIncomingMidi(routed);
     midiCollector.addMessageToQueue(routed);
 
-    const int ch = routed.getChannel();
-    const bool noteMsg = routed.isNoteOnOrOff();
-    const int n = noteMsg ? routed.getNoteNumber() : -1;
-    const bool down = noteMsg && routed.isNoteOn() && routed.getVelocity() > 0;
-    const bool followHardware = ! uiChannelLocked.load();
-    const bool highlight = followHardware
-        && ((routed.isNoteOn() && routed.getVelocity() > 0)
-            || routed.isController() || routed.isProgramChange());
+    const int destChannel = liveMidiChannel.load();
+    const bool noteMsg = message.isNoteOnOrOff();
+    const int note = noteMsg ? message.getNoteNumber() : -1;
+    const int velocity = noteMsg ? (int) message.getVelocity() : 0;
+    const bool down = noteMsg && message.isNoteOn() && message.getVelocity() > 0;
+
     juce::Component::SafePointer<SynthKeyboard> kb(&synthKeyboard);
     juce::Component::SafePointer<MainComponent> self(this);
-    juce::MessageManager::callAsync([kb, self, n, down, ch, noteMsg, highlight]
+    juce::MessageManager::callAsync([kb, self, note, velocity, down, destChannel, noteMsg]
     {
         if (kb != nullptr && noteMsg)
-            kb->setExternalHeld(n, down);
-        if (self == nullptr || ! highlight)
+            kb->setExternalHeld(note, down);
+        if (self == nullptr || ! noteMsg || ! down)
             return;
-        self->applyLiveMidiChannel(ch);
+
+        juce::String dest = "CH" + juce::String(destChannel);
+        if (destChannel == groove::kMidiChDrums) dest = "DRUMS";
+        else if (destChannel == groove::kMidiChMoog) dest = "MOOG";
+        else if (destChannel == groove::kMidiChPoly) dest = "PROPHET";
+        else if (destChannel == groove::kMidiChKeys) dest = "KEYS";
+
+        const auto noteName = juce::MidiMessage::getMidiNoteName(note, true, true, 3);
+        self->evolutionStatus.setText("MIDI IN · " + noteName
+                                        + " · " + juce::String(note)
+                                        + " · VEL " + juce::String(velocity)
+                                        + " → " + dest,
+                                      juce::dontSendNotification);
     });
 }
-
 juce::StringArray MainComponent::getMenuBarNames()
 {
     return { "File", "Sound", "MIDI" };
@@ -905,7 +1080,6 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelIndex, const juce::St
         if (ujamPluginFiles.isEmpty())
             plugins.addItem(999, "(No UJAM plugins found)", false, false);
         plugins.addSeparator();
-        plugins.addItem(1000, "Browse for plugin...");
         menu.addSubMenu("Load UJAM / VST", plugins);
 
         const bool loaded = pluginHost.isLoaded();
@@ -916,7 +1090,6 @@ juce::PopupMenu MainComponent::getMenuForIndex(int topLevelIndex, const juce::St
         menu.addItem(221, synthLoaded ? ("Show " + synthHost.getName() + " UI") : "Show Mini-Moog UI",
                      synthLoaded, synthHost.isEditorOpen());
         menu.addItem(222, "Load Mini-Moog");
-        menu.addItem(1100, "Browse for synth...");
         menu.addSeparator();
         const bool keysLoaded = keysHost.isLoaded();
         menu.addItem(223, keysLoaded ? ("Show " + keysHost.getName() + " UI") : "Show Keys UI",
@@ -996,7 +1169,6 @@ void MainComponent::menuItemSelected(int menuItemID, int)
     if (menuItemID == 226) { showAllInstrumentEditors(); return; }
     if (menuItemID == 227) { tryLoadPolymax(); return; }
     if (menuItemID == 228) { showProphetBrowser(); return; }
-    if (menuItemID == 1100) { browseForSynth(); return; }
     if (menuItemID == 230) { newGroove(); return; }
     if (menuItemID == 231) { showLoadMenu(); return; }
     if (menuItemID == 232) { saveCurrentGroove(); return; }
@@ -1102,6 +1274,196 @@ void MainComponent::loadPluginFromFile(const juce::File& file)
                             juce::dontSendNotification);
         refreshVstKitUi(true);
     }
+}
+
+juce::File MainComponent::findCapitolChambersFile()
+{
+    // Capitol Chambers exists as both legacy UAD/UAD-2 DSP and native UADx.
+    // Lil God Projector must host the native UADx plug-in only.
+    const auto home = juce::File::getSpecialLocation(juce::File::userHomeDirectory);
+    const juce::File roots[] = {
+        juce::File("/Library/Audio/Plug-Ins/VST3"),
+        home.getChildFile("Library/Audio/Plug-Ins/VST3"),
+        juce::File("/Library/Audio/Plug-Ins/Components"),
+        home.getChildFile("Library/Audio/Plug-Ins/Components")
+    };
+
+    juce::File best;
+    int bestScore = -1;
+
+    for (const auto& dir : roots)
+    {
+        if (! dir.isDirectory())
+            continue;
+
+        juce::Array<juce::File> files;
+        dir.findChildFiles(files, juce::File::findFilesAndDirectories, true);
+
+        for (const auto& f : files)
+        {
+            if (! (f.hasFileExtension("vst3") || f.hasFileExtension("component")))
+                continue;
+
+            const auto name = f.getFileNameWithoutExtension();
+            const auto full = f.getFullPathName();
+
+            if (! name.containsIgnoreCase("Capitol")
+                || ! name.containsIgnoreCase("Chambers"))
+                continue;
+
+            // Explicitly reject known legacy/DSP naming when it is identifiable.
+            const bool saysUadx = name.containsIgnoreCase("UADx")
+                               || full.containsIgnoreCase("/UADx/");
+            const bool saysLegacyUad = (name.startsWithIgnoreCase("UAD ")
+                                     || name.startsWithIgnoreCase("UAD-")
+                                     || full.containsIgnoreCase("/UAD-2/"))
+                                    && ! saysUadx;
+            if (saysLegacyUad)
+                continue;
+
+            int score = 0;
+            if (saysUadx) score += 1000;             // Native UA build is mandatory/preferred.
+            if (f.hasFileExtension("vst3")) score += 100; // Prefer VST3 over AU when both exist.
+            if (name.startsWithIgnoreCase("UADx")) score += 50;
+            if (full.containsIgnoreCase("Universal Audio")) score += 10;
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = f;
+            }
+        }
+    }
+
+    return best;
+}
+
+void MainComponent::tryLoadCapitolChambers()
+{
+    const auto file = findCapitolChambersFile();
+    if (! file.exists())
+    {
+        evolutionStatus.setText("UADx Capitol Chambers not found", juce::dontSendNotification);
+        return;
+    }
+    juce::String error;
+    int loaded = 0;
+    for (auto& host : capitolReverbHosts)
+    {
+        if (host.loadFromFile(file, error)) ++loaded;
+    }
+    if (loaded == (int) capitolReverbHosts.size())
+    {
+        for (int c = 0; c < groove::kMixChannels; ++c)
+        {
+            auto& host = capitolReverbHosts[(size_t) c];
+            const auto& fx = engine.state().mix.channelFx[(size_t) c];
+            host.setParameterByName({ "chamber", "size" }, fx.reverbSize);
+            host.setParameterByName({ "decay", "time" }, fx.reverbDecay);
+            const float wet = juce::jlimit(0.0f, 1.0f, fx.reverbWet * juce::jmap(fx.reverbVolume, 0.0f, 1.0f, 0.35f, 1.25f));
+            host.setParameterByName({ "mix", "wet" }, juce::jlimit(0.0f, 1.0f, wet));
+            host.setParameterByName({ "pre delay", "predelay", "pre-delay" }, fx.reverbPreDelay);
+            host.setParameterByName({ "width", "stereo" }, fx.reverbWidth);
+            host.setParameterByName({ "bass" }, fx.reverbBass);
+            host.setParameterByName({ "mid" }, fx.reverbMid);
+            host.setParameterByName({ "treble", "high" }, fx.reverbTreble);
+            host.setParameterByName({ "level", "volume", "vol", "output", "out" }, fx.reverbVolume);
+        }
+        evolutionStatus.setText("REVERB · Capitol Chambers · SIZE DECAY WET PRE WIDTH BASS TREBLE VOL", juce::dontSendNotification);
+    }
+    else
+        evolutionStatus.setText("Capitol Chambers load issue · " + error, juce::dontSendNotification);
+}
+
+
+juce::File MainComponent::findParadiseGuitarStudioFile()
+{
+    // Paradise Guitar Studio is a native UAD plug-in. Prefer its VST3 build,
+    // then Audio Unit, and reject identifiable UAD-2/DSP paths.
+    const auto home = juce::File::getSpecialLocation(juce::File::userHomeDirectory);
+    const juce::File roots[] = {
+        juce::File("/Library/Audio/Plug-Ins/VST3"),
+        home.getChildFile("Library/Audio/Plug-Ins/VST3"),
+        juce::File("/Library/Audio/Plug-Ins/Components"),
+        home.getChildFile("Library/Audio/Plug-Ins/Components")
+    };
+
+    juce::File best;
+    int bestScore = -1;
+
+    for (const auto& dir : roots)
+    {
+        if (! dir.isDirectory())
+            continue;
+
+        juce::Array<juce::File> files;
+        dir.findChildFiles(files, juce::File::findFilesAndDirectories, true);
+
+        for (const auto& f : files)
+        {
+            if (! (f.hasFileExtension("vst3") || f.hasFileExtension("component")))
+                continue;
+
+            const auto name = f.getFileNameWithoutExtension();
+            const auto full = f.getFullPathName();
+
+            if (! name.containsIgnoreCase("Paradise")
+                || ! name.containsIgnoreCase("Guitar"))
+                continue;
+
+            const bool legacyDsp = full.containsIgnoreCase("/UAD-2/")
+                                || name.startsWithIgnoreCase("UAD-");
+            if (legacyDsp)
+                continue;
+
+            int score = 0;
+            if (f.hasFileExtension("vst3")) score += 100;
+            if (full.containsIgnoreCase("Universal Audio")) score += 10;
+            if (name.containsIgnoreCase("Paradise Guitar Studio")) score += 50;
+
+            if (score > bestScore)
+            {
+                bestScore = score;
+                best = f;
+            }
+        }
+    }
+    return best;
+}
+
+void MainComponent::tryLoadParadiseGuitarStudio()
+{
+    const auto file = findParadiseGuitarStudioFile();
+    if (! file.exists())
+    {
+        evolutionStatus.setText("Paradise Guitar Studio not found", juce::dontSendNotification);
+        return;
+    }
+
+    juce::String error;
+    int loaded = 0;
+    for (auto& host : paradiseGuitarHosts)
+        if (host.loadFromFile(file, error)) ++loaded;
+
+    if (loaded == (int) paradiseGuitarHosts.size())
+    {
+        for (int c = 0; c < groove::kMixChannels; ++c)
+        {
+            auto& host = paradiseGuitarHosts[(size_t) c];
+            const auto& fx = engine.state().mix.channelFx[(size_t) c];
+            host.setParameterByName({ "input", "in" }, fx.paradiseInput);
+            host.setParameterByName({ "gate", "threshold" }, fx.paradiseGate);
+            host.setParameterByName({ "pre", "pre fx", "prefx", "pre level" }, fx.paradisePre);
+            host.setParameterByName({ "amp", "amp level" }, fx.paradiseAmp);
+            host.setParameterByName({ "cab", "cab level", "cabinet" }, fx.paradiseCab);
+            host.setParameterByName({ "room" }, fx.paradiseRoom);
+            host.setParameterByName({ "output", "out", "volume", "vol" }, fx.paradiseOutput);
+            host.setParameterByName({ "limit", "limiter" }, fx.paradiseLimit);
+        }
+        evolutionStatus.setText("FX · Paradise Guitar Studio · IN GATE PRE AMP CAB ROOM VOL LIMIT", juce::dontSendNotification);
+    }
+    else
+        evolutionStatus.setText("Paradise Guitar Studio load issue · " + error, juce::dontSendNotification);
 }
 
 juce::File MainComponent::findMiniMoogFile()
@@ -1268,72 +1630,22 @@ void MainComponent::applyLiveMidiChannel(int channel)
 
 void MainComponent::selectMidiChannelFromUi(int channel)
 {
+    const int melodicLane = groove::midiLaneIndexForChannel(channel);
+    if (melodicLane > 0) pianoRoll.setLane(melodicLane);
+
     const int ch = juce::jlimit(1, 16, channel > 0 ? channel : groove::kMidiChMoog);
     if (ch != liveMidiChannel.load() && engine.isRecording())
         engine.setRecording(false);
     uiChannelLocked.store(true);
     applyLiveMidiChannel(ch);
-    sendArturiaChannelChange(liveMidiChannel.load());
     if (currentPage == 2)
         songPage.refreshFromEngine();
-}
-
-void MainComponent::ensureArturiaMidiOutput()
-{
-    if (midiOutput != nullptr)
-        return;
-    refreshMidiOutputs();
-    int arturia = -1;
-    for (int i = 0; i < midiDevices.size(); ++i)
+    else if (currentPage == 0)
     {
-        const auto& name = midiDevices[i].name;
-        if (isVirtualMidiName(name))
-            continue;
-        if (looksLikeKeyboardMidi(name))
-        {
-            arturia = i;
-            break;
-        }
+        pianoRoll.refresh();
+        resized();
+        repaint();
     }
-    if (arturia >= 0)
-        setMidiOutput(arturia);
-}
-
-void MainComponent::sendArturiaChannelChange(int channel)
-{
-    const int ch = juce::jlimit(1, 16, channel > 0 ? channel : 1);
-    const int note = (ch == groove::kMidiChDrums) ? 36 : 60;
-    auto on = juce::MidiMessage::noteOn(ch, note, (juce::uint8) 100);
-    auto off = juce::MidiMessage::noteOff(ch, note);
-    on.setTimeStamp(juce::Time::getMillisecondCounterHiRes() * 0.001);
-    off.setTimeStamp(on.getTimeStamp() + 0.12);
-    midiCollector.addMessageToQueue(on);
-    midiCollector.addMessageToQueue(off);
-
-    ensureArturiaMidiOutput();
-    if (midiOutput == nullptr)
-    {
-        evolutionStatus.setText("MIDI · CH" + juce::String(ch)
-                                    + " selected  ·  no Arturia MIDI out",
-                                juce::dontSendNotification);
-        return;
-    }
-    midiOutput->sendMessageNow(juce::MidiMessage::noteOn(ch, note, (juce::uint8) 100));
-    juce::Timer::callAfterDelay(120, [this, ch, note]
-    {
-        if (midiOutput != nullptr)
-            midiOutput->sendMessageNow(juce::MidiMessage::noteOff(ch, note));
-    });
-    juce::String dest = "CH" + juce::String(ch);
-    if (ch == groove::kMidiChDrums) dest = "DRUMS";
-    else if (ch == groove::kMidiChMoog) dest = "MOOG";
-    else if (ch == groove::kMidiChPoly) dest = "PROPHET";
-    else if (ch == groove::kMidiChKeys) dest = "KEYS";
-    const juce::String outName = (midiOutIndex >= 0 && midiOutIndex < midiDevices.size())
-        ? midiDevices[midiOutIndex].name : "MIDI out";
-    evolutionStatus.setText("MIDI · CH" + juce::String(ch) + "  →  " + dest
-                                + "  ·  locked  ·  sent to " + outName,
-                            juce::dontSendNotification);
 }
 
 void MainComponent::splitDrumAndSynthMidi(const juce::MidiBuffer& src,
@@ -1362,11 +1674,35 @@ void MainComponent::splitDrumAndSynthMidi(const juce::MidiBuffer& src,
     }
 }
 
-void MainComponent::routeLiveMidi(const juce::MidiBuffer& live,
-                                 juce::MidiBuffer& drums, juce::MidiBuffer& moog,
-                                 juce::MidiBuffer& keys, juce::MidiBuffer& poly) const
+void MainComponent::routeExternalMidiToSelected(const juce::MidiBuffer& live,
+                                                juce::MidiBuffer& drums, juce::MidiBuffer& moog,
+                                                juce::MidiBuffer& keys, juce::MidiBuffer& poly) const
 {
+    // Hardware keyboards commonly transmit on CH1. CH1 must not implicitly mean
+    // drums during normal live play. The selected mixer/keyboard target is the
+    // destination; the plug-in host will normalize the plug-in-facing channel.
+    const int dest = liveMidiChannel.load();
     for (const auto metadata : live)
+    {
+        auto msg = metadata.getMessage();
+        const int pos = metadata.samplePosition;
+
+        if (dest == groove::kMidiChDrums)
+            drums.addEvent(groove::withMidiChannel(msg, groove::kMidiChDrums), pos);
+        else if (dest == groove::kMidiChMoog)
+            moog.addEvent(groove::withMidiChannel(msg, groove::kMidiChMoog), pos);
+        else if (dest == groove::kMidiChPoly)
+            poly.addEvent(groove::withMidiChannel(msg, groove::kMidiChPoly), pos);
+        else if (dest == groove::kMidiChKeys)
+            keys.addEvent(groove::withMidiChannel(msg, groove::kMidiChKeys), pos);
+    }
+}
+
+void MainComponent::routeChannelMidi(const juce::MidiBuffer& source,
+                                    juce::MidiBuffer& drums, juce::MidiBuffer& moog,
+                                    juce::MidiBuffer& keys, juce::MidiBuffer& poly) const
+{
+    for (const auto metadata : source)
     {
         const auto msg = metadata.getMessage();
         const int pos = metadata.samplePosition;
@@ -1396,6 +1732,68 @@ void MainComponent::tryLoadMiniMoog()
     if (synthHost.isLoaded() && synthHost.getFile() == file)
         return;
     loadSynthFromFile(file);
+}
+
+void MainComponent::showInstrumentBrowser(int channel)
+{
+    if (instrumentBrowser == nullptr)
+        instrumentBrowser = std::make_unique<InstrumentBrowserWindow>(look, "INSTRUMENTS");
+
+    juce::String slot = "CH" + juce::String(channel);
+    if (channel == groove::kMidiChDrums) slot = "DRUMS · CH1";
+    else if (channel == groove::kMidiChMoog) slot = "CH2";
+    else if (channel == groove::kMidiChPoly) slot = "CH3";
+    else if (channel == groove::kMidiChKeys) slot = "CH4";
+
+    instrumentBrowser->showBrowser(slot, [this, channel](const juce::File& f)
+    {
+        loadInstrumentForChannel(channel, f);
+    });
+}
+
+void MainComponent::loadInstrumentForChannel(int channel, const juce::File& file)
+{
+    if (channel == groove::kMidiChMoog)
+    {
+        loadSynthFromFile(file);
+        selectMidiChannelFromUi(channel);
+        return;
+    }
+
+    groove::ExternalPluginHost* host = nullptr;
+    juce::String* storedPath = nullptr;
+    juce::String label;
+    if (channel == groove::kMidiChDrums)
+    {
+        host = &pluginHost; storedPath = &engine.state().lastPluginPath; label = "DRUMS";
+    }
+    else if (channel == groove::kMidiChPoly)
+    {
+        host = &polymaxHost; storedPath = &engine.state().lastPolymaxPluginPath; label = "CH3";
+    }
+    else if (channel == groove::kMidiChKeys)
+    {
+        host = &keysHost; storedPath = &engine.state().lastKeysPluginPath; label = "CH4";
+    }
+    if (host == nullptr || storedPath == nullptr) return;
+
+    juce::String error;
+    if (! host->loadFromFile(file, error))
+    {
+        evolutionStatus.setText(label + " · instrument failed: " + error, juce::dontSendNotification);
+        return;
+    }
+    *storedPath = file.getFullPathName();
+    auto* dev = deviceManager.getCurrentAudioDevice();
+    host->prepare(dev != nullptr ? dev->getCurrentSampleRate() : 44100.0,
+                  dev != nullptr ? dev->getCurrentBufferSizeSamples() : 512);
+    engine.saveAutosave();
+    selectMidiChannelFromUi(channel);
+    evolutionStatus.setText(label + " · " + host->getName(), juce::dontSendNotification);
+    host->showEditor();
+    if (channel == groove::kMidiChDrums) refreshVstKitUi(true);
+    else if (channel == groove::kMidiChPoly) refreshPolyKitUi(true);
+    else if (channel == groove::kMidiChKeys) refreshKeysKitUi(true);
 }
 
 void MainComponent::browseForSynth()
@@ -1694,13 +2092,17 @@ void MainComponent::loadGrooveFromFile(const juce::File& file)
 void MainComponent::newGroove()
 {
     engine.newProject();
+    loadInstrumentDefaultsIntoState();
     applyLoadedSession();
     evolutionStatus.setText("NEW GROOVE", juce::dontSendNotification);
 }
 
-void MainComponent::showLoadMenu()
+void MainComponent::showFileMenu()
 {
     juce::PopupMenu menu;
+    menu.addItem(2001, "Save");
+    menu.addItem(2002, "Save As...");
+    menu.addSeparator();
     const auto stored = engine.listStoredGrooves();
     juce::Array<juce::File> files;
     if (stored.isEmpty())
@@ -1719,9 +2121,11 @@ void MainComponent::showLoadMenu()
     menu.addItem(1002, "Export File...");
     menu.addItem(1003, "Reveal Store Folder");
 
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&loadButton),
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&fileMenuButton),
         [this, files](int result)
         {
+            if (result == 2001) { saveCurrentGroove(); return; }
+            if (result == 2002) { saveGrooveAs(); return; }
             if (result == 1000) { newGroove(); return; }
             if (result == 1001)
             {
@@ -1735,8 +2139,8 @@ void MainComponent::showLoadMenu()
                     if (file.existsAsFile())
                         loadGrooveFromFile(file);
                 });
-        return;
-    }
+                return;
+            }
             if (result == 1002) { saveGrooveAsFile(); return; }
             if (result == 1003)
             {
@@ -1746,6 +2150,26 @@ void MainComponent::showLoadMenu()
             if (result >= 1 && result <= files.size())
                 loadGrooveFromFile(files[result - 1]);
         });
+}
+
+void MainComponent::showLabMenu()
+{
+    juce::PopupMenu menu;
+    menu.addItem(1, "Capture");
+    menu.addItem(2, "Back");
+    menu.addItem(3, "Open Evolve Lab");
+    menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&labMenuButton),
+        [this](int result)
+        {
+            if (result == 1) captureButton.triggerClick();
+            else if (result == 2) backButton.triggerClick();
+            else if (result == 3) evolveButton.triggerClick();
+        });
+}
+
+void MainComponent::showLoadMenu()
+{
+    showFileMenu();
 }
 
 void MainComponent::refreshMidiOutputs()
@@ -1868,9 +2292,45 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster*)
                                 juce::dontSendNotification);
 }
 
+juce::PropertiesFile::Options MainComponent::instrumentPreferenceOptions()
+{
+    juce::PropertiesFile::Options options;
+    options.applicationName = "Lil God Projector";
+    options.filenameSuffix = "settings";
+    options.folderName = "Lil God Projector";
+    options.osxLibrarySubFolder = "Application Support";
+    return options;
+}
+
+void MainComponent::saveInstrumentDefaults()
+{
+    captureSessionIntoState();
+    juce::PropertiesFile prefs(instrumentPreferenceOptions());
+    prefs.setValue("defaultDrums", engine.state().lastPluginPath);
+    prefs.setValue("defaultCh2", engine.state().lastSynthPluginPath);
+    prefs.setValue("defaultCh3", engine.state().lastPolymaxPluginPath);
+    prefs.setValue("defaultCh4", engine.state().lastKeysPluginPath);
+    prefs.saveIfNeeded();
+    evolutionStatus.setText("PREFERENCES · instrument defaults saved", juce::dontSendNotification);
+}
+
+void MainComponent::loadInstrumentDefaultsIntoState()
+{
+    juce::PropertiesFile prefs(instrumentPreferenceOptions());
+    auto& st = engine.state();
+    const auto drum = prefs.getValue("defaultDrums");
+    const auto ch2 = prefs.getValue("defaultCh2");
+    const auto ch3 = prefs.getValue("defaultCh3");
+    const auto ch4 = prefs.getValue("defaultCh4");
+    if (drum.isNotEmpty()) st.lastPluginPath = drum;
+    if (ch2.isNotEmpty()) st.lastSynthPluginPath = ch2;
+    if (ch3.isNotEmpty()) st.lastPolymaxPluginPath = ch3;
+    if (ch4.isNotEmpty()) st.lastKeysPluginPath = ch4;
+}
+
 void MainComponent::showPreferences()
 {
-    auto* panel = new AudioPreferencesPanel(deviceManager);
+    auto* panel = new AudioPreferencesPanel(deviceManager, [this] { saveInstrumentDefaults(); });
     panel->setLookAndFeel(&look);
 
     juce::DialogWindow::LaunchOptions opts;
@@ -1942,11 +2402,67 @@ bool MainComponent::importDroppedMidi(const juce::StringArray& files)
     return false;
 }
 
+void MainComponent::tapTempo()
+{
+    const auto now = juce::Time::currentTimeMillis();
+
+    // A pause starts a fresh tap sequence rather than averaging unrelated taps.
+    if (tapCount > 0 && now - tapTimesMs[(size_t) juce::jmin(tapCount - 1, 4)] > 2000)
+        tapCount = 0;
+
+    if (tapCount < (int) tapTimesMs.size())
+    {
+        tapTimesMs[(size_t) tapCount++] = now;
+    }
+    else
+    {
+        for (size_t i = 1; i < tapTimesMs.size(); ++i)
+            tapTimesMs[i - 1] = tapTimesMs[i];
+        tapTimesMs.back() = now;
+    }
+
+    if (tapCount < 2)
+    {
+        evolutionStatus.setText("TAP TEMPO · tap T again", juce::dontSendNotification);
+        return;
+    }
+
+    const int count = juce::jmin(tapCount, (int) tapTimesMs.size());
+    const int first = tapCount < (int) tapTimesMs.size() ? 0 : 0;
+    double totalMs = 0.0;
+    int intervals = 0;
+    for (int i = first + 1; i < count; ++i)
+    {
+        const auto dt = tapTimesMs[(size_t) i] - tapTimesMs[(size_t) (i - 1)];
+        if (dt >= 230 && dt <= 1500)
+        {
+            totalMs += (double) dt;
+            ++intervals;
+        }
+    }
+
+    if (intervals == 0)
+        return;
+
+    const double tappedBpm = juce::jlimit(40.0, 260.0, 60000.0 / (totalMs / intervals));
+    bpm.setValue(juce::roundToInt(tappedBpm), juce::sendNotificationSync);
+    evolutionStatus.setText("TAP TEMPO · " + juce::String(juce::roundToInt(tappedBpm)) + " BPM",
+                            juce::dontSendNotification);
+}
+
 bool MainComponent::keyPressed(const juce::KeyPress& key)
 {
     if (key == juce::KeyPress::spaceKey)
     {
         toggleTransport();
+        return true;
+    }
+    if ((key.getKeyCode() == 't' || key.getKeyCode() == 'T')
+        && ! key.getModifiers().isCommandDown()
+        && ! key.getModifiers().isCtrlDown()
+        && ! key.getModifiers().isAltDown())
+    {
+        tapTempo();
         return true;
     }
     if (key.getKeyCode() == 'm' || key.getKeyCode() == 'M')
@@ -1979,6 +2495,17 @@ bool MainComponent::keyPressed(const juce::KeyPress& key)
     if (key == juce::KeyPress('o', juce::ModifierKeys::commandModifier, 0))
     {
         showLoadMenu();
+        return true;
+    }
+    if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey)
+    {
+        if (currentPage == 2)
+            return songPage.deleteSelectedNote();
+        engine.deleteNote(engine.state().selectedTrack, engine.state().selectedStep);
+        refreshFromSelection();
+        torsoPage.refreshFromEngine();
+        songPage.refreshFromEngine();
+        repaint();
         return true;
     }
     if (key == juce::KeyPress('n', juce::ModifierKeys::commandModifier, 0))
@@ -2071,10 +2598,11 @@ void MainComponent::drawGrid(juce::Graphics& g)
         for(int s=0;s<groove::kSteps;++s)
         {
             juce::Rectangle<float> pad(area.getX()+s*sw+1.5f,(float)y+2,sw-3,rh-6); const auto& st=tr.steps[s];
-            bool outside=s>=tr.generatorSteps, gen=!outside&&engine.isGeneratedHit(t,s), resolved=!outside&&engine.isResolvedHit(t,s), selected=t==state.selectedTrack&&s==state.selectedStep, play=s==engine.currentStepForTrack(t);
+            const bool generatorActive = tr.rhythmMode != groove::RhythmMode::step;
+            bool outside=s>=tr.generatorSteps, gen=generatorActive&&!outside&&engine.isGeneratedHit(t,s), resolved=!outside&&engine.isResolvedHit(t,s), selected=t==state.selectedTrack&&s==state.selectedStep, play=s==engine.currentStepForTrack(t);
             if(outside) g.setColour(juce::Colour(0xff091118));
             else if(silent) g.setColour(resolved ? juce::Colour(0xff2a333a) : juce::Colour(0xff12181c));
-            else if(resolved) g.setColour(c.withAlpha(st.overrideMode==groove::StepOverrideMode::forceOn?1.0f:0.72f));
+            else if(resolved) g.setColour(c);
             else g.setColour(juce::Colour(0xff17252f));
             g.fillRoundedRectangle(pad,2.5f);
             if(gen && !resolved && !silent){ g.setColour(c.withAlpha(0.22f)); g.fillRoundedRectangle(pad.reduced(2),2); }
@@ -2090,28 +2618,33 @@ void MainComponent::drawGrid(juce::Graphics& g)
 
 void MainComponent::paint(juce::Graphics& g)
 {
-    g.fillAll(juce::Colour(0xff050c12)); g.setColour(juce::Colour(0xff08131c)); g.fillRect(0,0,getWidth(),72);
+    g.fillAll(juce::Colour(0xff050c12));
+    g.setColour(juce::Colour(0xff08131c));
+    g.fillRect(0, 0, getWidth(), 52);
     {
         auto icon = juce::ImageCache::getFromMemory(BinaryData::GrooveLabIcon_png,
                                                     BinaryData::GrooveLabIcon_pngSize);
-        g.drawImageWithin(icon, 12, 12, 48, 48, juce::RectanglePlacement::centred);
+        g.drawImageWithin(icon, 8, 10, 32, 32, juce::RectanglePlacement::centred);
     }
-    g.setColour(juce::Colour(0xffe6f0f5));g.setFont(juce::FontOptions(16.0f,juce::Font::bold));g.drawText("Lil God Projector",66,16,236,34,juce::Justification::centredLeft);
 
     if (currentPage == 0)
     {
-        drawPanel(g,sequencerPanel,"SEQUENCER · " + juce::String(groove::meterName(engine.state().meter))
-                  + " · " + juce::String(groove::meterTransformName(engine.state().meterTransform))
-                  + "  ·  DOT MUTES ROW · ⌥ SOLO");
-        drawPanel(g,inspectorPanel,"TRACK GENERATOR / STEP EDIT");
+        const bool melodic = liveMidiChannel.load() != groove::kMidiChDrums;
+        if (! melodic)
+        {
+            drawPanel(g,sequencerPanel,"SEQUENCER · " + juce::String(groove::meterName(engine.state().meter))
+                      + " · " + juce::String(groove::meterTransformName(engine.state().meterTransform))
+                      + "  ·  DOT MUTES ROW · ⌥ SOLO");
+            drawPanel(g,inspectorPanel,"TRACK GENERATOR / STEP EDIT");
+            drawGrid(g);
+            g.setColour(juce::Colour(0xff829bab)); g.setFont(juce::FontOptions(10.0f));
+            auto ip = inspectorPanel.reduced(14); ip.removeFromTop(68);
+            g.drawText("STEPS", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft); ip.removeFromTop(28);
+            g.drawText("PULSES", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft); ip.removeFromTop(28);
+            g.drawText("ROTATE", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft); ip.removeFromTop(28);
+            g.drawText("DIVISION", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft);
+        }
         drawPanel(g,soundPanel,"MIX");
-        drawGrid(g);
-        g.setColour(juce::Colour(0xff829bab)); g.setFont(juce::FontOptions(10.0f));
-        auto ip = inspectorPanel.reduced(14); ip.removeFromTop(68);
-        g.drawText("STEPS", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft); ip.removeFromTop(28);
-        g.drawText("PULSES", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft); ip.removeFromTop(28);
-        g.drawText("ROTATE", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft); ip.removeFromTop(28);
-        g.drawText("DIVISION", ip.getX(), ip.getY(), 68, 24, juce::Justification::centredLeft);
     }
 
     g.setColour(juce::Colour(0xff112631));g.fillRect(0,getHeight()-34,getWidth(),34);
@@ -2119,7 +2652,7 @@ void MainComponent::paint(juce::Graphics& g)
     if (midiDragOver)
     {
         g.setColour(juce::Colour(0xffff8a22).withAlpha(0.18f));
-        g.fillRect(getLocalBounds().withTrimmedTop(72).withTrimmedBottom(34 + synthKeyboardH));
+        g.fillRect(getLocalBounds().withTrimmedTop(52).withTrimmedBottom(34 + synthKeyboardH));
         g.setColour(juce::Colour(0xffff8a22));
         g.setFont(juce::FontOptions(22.0f, juce::Font::bold));
         g.drawText("DROP UJAM PHRASE TO LOAD GRID",
@@ -2129,46 +2662,56 @@ void MainComponent::paint(juce::Graphics& g)
 
 void MainComponent::resized()
 {
-    int margin=12,header=72,foot=34,rightW=330,gap=10,lowerH=268; auto content=getLocalBounds().withTrimmedTop(header).withTrimmedBottom(foot + synthKeyboardH).reduced(margin,8); auto right=content.removeFromRight(rightW);content.removeFromRight(gap);auto bottom=content.removeFromBottom(lowerH);content.removeFromBottom(gap);sequencerPanel=content;inspectorPanel=right;soundPanel=bottom;
+    int margin=12,header=52,foot=34,rightW=330,gap=10,lowerH=380;
+    auto content=getLocalBounds().withTrimmedTop(header).withTrimmedBottom(foot + synthKeyboardH).reduced(margin,8);
+    auto right=content.removeFromRight(rightW);content.removeFromRight(gap);
+    auto bottom=content.removeFromBottom(lowerH);content.removeFromBottom(gap);
+    sequencerPanel=content;inspectorPanel=right;soundPanel=bottom;
 
-    const int hy = 19, hh = 32, hg = 6;
-    int x = 308;
+    const int hy = 12, hh = 28, hg = 4;
+    int x = 46;
     auto placeLeft = [&](juce::Component& c, int w)
     {
         c.setBounds(x, hy, w, hh);
         x += w + hg;
     };
-    projectName.setBounds(x, hy, 128, hh); x += 128 + hg;
-    placeLeft(saveButton, 48);
-    placeLeft(saveAsButton, 70);
-    placeLeft(loadButton, 48);
-    placeLeft(captureButton, 64);
-    placeLeft(backButton, 50);
-    placeLeft(evolveButton, 64);
-    placeLeft(resetButton, 52);
-    placeLeft(playButton, 60);
-    placeLeft(performButton, 72);
-    placeLeft(commitPerformButton, 80);
-    bpmLabel.setBounds(x, hy, 28, hh);
-    x += 28 + 2;
-    int bpmW = 118;
+    auto gapLeft = [&](int px) { x += px; };
 
-    const int pageW = 50 + hg + 88 + hg + 50;
+    projectName.setBounds(x, hy, 110, hh); x += 110 + hg;
+    placeLeft(fileMenuButton, 44);
+    placeLeft(labMenuButton, 40);
+    gapLeft(6);
+    placeLeft(resetButton, 36);
+    placeLeft(playButton, 48);
+    placeLeft(performButton, 44);
+    placeLeft(commitPerformButton, 44);
+    gapLeft(6);
+    bpmLabel.setBounds(x, hy, 24, hh);
+    x += 24 + 2;
+    int bpmW = 96;
+
+#if GROOVELAB_LABS_ENSEMBLE
+    const int pageW = 42 + hg + 40 + hg + 42 + hg + 42;
+#else
+    const int pageW = 42 + hg + 40 + hg + 42;
+#endif
     int rightNeed = pageW;
-    int meterW = 58;
-    int transformW = 82;
-    int leftEnd = x + bpmW + 4 + 40 + 4 + meterW + 4 + transformW;
-    int startPages = getWidth() - 12 - rightNeed;
+    int meterW = 52;
+    int transformW = 72;
+    int leftEnd = x + bpmW + 4 + 36 + 4 + 34 + 4 + meterW + 4 + transformW;
+    int startPages = getWidth() - 10 - rightNeed;
     if (startPages < leftEnd + 8)
     {
-        bpmW = juce::jmax(72, bpmW - (leftEnd + 8 - startPages));
-        leftEnd = x + bpmW + 4 + 40 + 4 + meterW + 4 + transformW;
-        startPages = juce::jmax(leftEnd + 8, getWidth() - 12 - rightNeed);
+        bpmW = juce::jmax(64, bpmW - (leftEnd + 8 - startPages));
+        leftEnd = x + bpmW + 4 + 36 + 4 + 34 + 4 + meterW + 4 + transformW;
+        startPages = juce::jmax(leftEnd + 8, getWidth() - 10 - rightNeed);
     }
     bpm.setBounds(x, hy, bpmW, hh);
     x += bpmW + 4;
-    meterLabel.setBounds(x, hy, 40, hh);
-    x += 40 + 4;
+    tapTempoButton.setBounds(x, hy, 36, hh);
+    x += 36 + 4;
+    meterLabel.setBounds(x, hy, 34, hh);
+    x += 34 + 4;
     meterBox.setBounds(x, hy, meterW, hh);
     x += meterW + 4;
     meterTransformBox.setBounds(x, hy, transformW, hh);
@@ -2179,19 +2722,49 @@ void MainComponent::resized()
         c.setBounds(px, hy, w, hh);
         px += w + hg;
     };
-    place(pageGridButton, 50);
-    place(pageT1Button, 88);
-    place(pageSongButton, 50);
+    place(pageGridButton, 42);
+    place(pageT1Button, 40);
+    place(pageSongButton, 42);
+#if GROOVELAB_LABS_ENSEMBLE
+    place(pageEnsembleButton, 42);
+#endif
 
-    torsoPage.setBounds(getLocalBounds().withTrimmedTop(72).withTrimmedBottom(34 + synthKeyboardH));
-    songPage.setBounds(getLocalBounds().withTrimmedTop(72).withTrimmedBottom(34 + synthKeyboardH));
+    torsoPage.setBounds(getLocalBounds().withTrimmedTop(52).withTrimmedBottom(34 + synthKeyboardH));
+    songPage.setBounds(getLocalBounds().withTrimmedTop(52).withTrimmedBottom(34 + synthKeyboardH));
+#if GROOVELAB_LABS_ENSEMBLE
+    ensembleView.setBounds(getLocalBounds().withTrimmedTop(52).withTrimmedBottom(34 + synthKeyboardH));
+#endif
     if (currentPage == 2)
         songPage.toFront(false);
+#if GROOVELAB_LABS_ENSEMBLE
+    if (currentPage == 3)
+        ensembleView.toFront(false);
+#endif
     synthKeyboard.setBounds(8, getHeight() - 34 - synthKeyboardH, getWidth() - 16, synthKeyboardH);
     synthKeyboard.toFront(false);
     footer.setBounds(20,getHeight()-31,getWidth()-40,26);
     if (currentPage != 0)
+    {
+        pianoRoll.setVisible(false);
         return;
+    }
+
+    const bool melodicSequencer = liveMidiChannel.load() != groove::kMidiChDrums;
+    pianoRoll.setVisible(melodicSequencer);
+    if (melodicSequencer)
+    {
+        pianoRoll.setBounds(sequencerPanel.getUnion(inspectorPanel));
+        pianoRoll.toFront(false);
+        pianoRoll.refresh();
+    }
+
+    for (auto* c : std::initializer_list<juce::Component*>{
+            &auditionButton, &clearLocks, &deleteNote,
+            &soundScope, &soundScopeLabel, &velocity, &midiNote, &probability, &ratchet, &role,
+            &trackSteps, &trackPulses, &trackRotate, &trackDivision, &selectedLabel })
+        c->setVisible(! melodicSequencer);
+    for (auto& b : lockChips)
+        b.setVisible(! melodicSequencer);
 
     auto ins=inspectorPanel.reduced(14);ins.removeFromTop(42);selectedLabel.setBounds(ins.removeFromTop(26));
     auto gen=ins.removeFromTop(128);
@@ -2200,7 +2773,13 @@ void MainComponent::resized()
     soundScopeLabel.setBounds(lp.removeFromLeft(78));
     soundScope.setBounds(lp.removeFromLeft(82));
     lp.removeFromLeft(6);
-    clearLocks.setBounds(lp.removeFromLeft(138));
+    clearLocks.setBounds(lp.removeFromLeft(72));
+    lp.removeFromLeft(6);
+    deleteNote.setBounds(lp.removeFromLeft(100));
+    auto chips = ins.removeFromTop(26);
+    const int chipW = juce::jmax(36, chips.getWidth() / groove::paramCount);
+    for (int i = 0; i < groove::paramCount; ++i)
+        lockChips[(size_t) i].setBounds(chips.removeFromLeft(chipW).reduced(1, 2));
     auditionButton.setBounds(inspectorPanel.getX()+14,inspectorPanel.getBottom()-44,100,28);
 
     auto sf=sequencerPanel.reduced(12).removeFromBottom(36);velocity.setBounds(sf.removeFromLeft(78));sf.removeFromLeft(4);midiNote.setBounds(sf.removeFromLeft(78));sf.removeFromLeft(4);probability.setBounds(sf.removeFromLeft(82));sf.removeFromLeft(8);ratchet.setBounds(sf.removeFromLeft(68));sf.removeFromLeft(8);role.setBounds(sf.removeFromLeft(94));
@@ -2300,6 +2879,17 @@ void MainComponent::refreshFromSelection()
     meterTransformBox.setSelectedId((int) st.meterTransform + 1, juce::dontSendNotification);
     if (! projectName.hasKeyboardFocus(true))
         projectName.setText(st.name, false);
+    mixStrip.setSelectedStep(s);
+    for (int i = 0; i < groove::paramCount; ++i)
+    {
+        auto p = parameterOrder[(size_t) i];
+        const bool on = ss.locks[(size_t) p].has_value();
+        auto& b = lockChips[(size_t) i];
+        b.setColour(juce::TextButton::buttonColourId,
+                    on ? juce::Colour(0xff8a6a22) : juce::Colour(0xff152430));
+        b.setColour(juce::TextButton::textColourOffId,
+                    on ? juce::Colours::white : juce::Colour(0xff8aa0ae));
+    }
     refreshing=false;
 }
 
@@ -2336,9 +2926,26 @@ void MainComponent::mouseDown(const juce::MouseEvent& e)
     const float sw = (float) area.getWidth() / groove::kSteps;
     const int step = juce::jlimit(0, groove::kSteps - 1, (int) ((e.x - area.getX()) / sw));
     const int track = juce::jlimit(0, groove::kTracks - 1, (int) ((e.y - area.getY()) / rh));
+    const bool pureEuclid = engine.state().tracks[(size_t) track].rhythmMode == groove::RhythmMode::euclid;
     engine.selectStep(track, step);
-    if (! e.mods.isShiftDown())
+
+    if (e.mods.isPopupMenu() || e.mods.isRightButtonDown())
+    {
+        engine.deleteNote(track, step);
+    }
+    else if (pureEuclid)
+    {
+        // A normal click in EUCLID selects the generated step so velocity,
+        // probability and Param Locks remain fully editable. Double-click is
+        // an explicit placement edit and promotes the track to HYBRID.
+        if (e.getNumberOfClicks() >= 2)
+            engine.toggleStep(track, step);
+    }
+    else if (! e.mods.isShiftDown())
+    {
         engine.toggleStep(track, step);
+    }
+
     refreshFromSelection();
     repaint();
 }
@@ -2384,23 +2991,47 @@ void MainComponent::timerCallback()
             autoSelectMidiInput();
     }
     if (currentPage == 0)
+    {
         repaint();
+        if (pianoRoll.isVisible()) pianoRoll.repaint();
+    }
     if (evolutionWindow != nullptr && evolutionWindow->isVisible())
         evolutionWindow->lab.repaint();
 }
 
 void MainComponent::setPage(int page)
 {
+#if GROOVELAB_LABS_ENSEMBLE
+    currentPage = juce::jlimit(0, 3, page);
+    // BEAT is always a drum performance context. Never leave a melodic
+    // instrument silently selected when entering it.
+    if (currentPage == 3 && liveMidiChannel.load() != groove::kMidiChDrums)
+    {
+        uiChannelLocked.store(true);
+        applyLiveMidiChannel(groove::kMidiChDrums);
+    }
+#else
     currentPage = juce::jlimit(0, 2, page);
+#endif
     pageGridButton.setToggleState(currentPage == 0, juce::dontSendNotification);
     pageT1Button.setToggleState(currentPage == 1, juce::dontSendNotification);
     pageSongButton.setToggleState(currentPage == 2, juce::dontSendNotification);
+#if GROOVELAB_LABS_ENSEMBLE
+    pageEnsembleButton.setToggleState(currentPage == 3, juce::dontSendNotification);
+#endif
     torsoPage.setVisible(currentPage == 1);
     songPage.setVisible(currentPage == 2);
+#if GROOVELAB_LABS_ENSEMBLE
+    ensembleView.setVisible(currentPage == 3);
+#endif
     if (currentPage == 1)
         torsoPage.refreshFromEngine();
     else if (currentPage == 2)
         songPage.refreshFromEngine();
+#if GROOVELAB_LABS_ENSEMBLE
+    else if (currentPage == 3)
+        ensembleView.refreshFromEngine();
+#endif
     else
         refreshFromSelection();
     setLabPageVisible(currentPage == 0);
@@ -2411,11 +3042,13 @@ void MainComponent::setPage(int page)
 void MainComponent::setLabPageVisible(bool on)
 {
     for (auto* c : std::initializer_list<juce::Component*>{
-            &auditionButton, &clearLocks,
+            &auditionButton, &clearLocks, &deleteNote,
             &soundScope, &soundScopeLabel, &velocity, &midiNote, &probability, &ratchet, &role,
             &trackSteps, &trackPulses, &trackRotate, &trackDivision,
             &selectedLabel, &mixStrip})
         c->setVisible(on);
+    for (auto& b : lockChips)
+        b.setVisible(on);
 }
 
 void MainComponent::applyStoredPluginKit()

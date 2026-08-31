@@ -34,7 +34,8 @@ public:
     int selectedTrack = 0;
     int selectedStep = 0;
 
-    void seedDefaultSong();
+    void clearSong();
+    void seedDefaultSong(); // retained only for legacy/demo tooling; startup no longer calls it
     void applySongSection(int index);
     void captureLiveToCurrentSection();
 

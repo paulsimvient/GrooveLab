@@ -29,6 +29,7 @@ enum class Param : int
 
 enum class StepRole : int { normal = 0, anchor, ghost, fill };
 enum class EvolutionPolicy : int { protect = 0, anchorsOnly, free };
+enum class RhythmMode : int { step = 0, euclid, hybrid };
 
 // Manual edits live on top of the algorithmic generator.
 // inherit = use Euclidean result, forceOn = always trigger, forceOff = suppress.
@@ -97,6 +98,10 @@ struct Track
 {
     std::array<Step, kSteps> steps {};
     VoiceParams base {};
+
+    // Per-track rhythm mode. STEP = manual hits only, EUCLID = pure generator,
+    // HYBRID = Euclidean base with per-step force on/off overrides.
+    RhythmMode rhythmMode = RhythmMode::hybrid;
 
     // Algorithmic rhythm generator.
     int generatorSteps = 16;
@@ -387,6 +392,87 @@ inline constexpr int kEqBands = 7;
 inline constexpr float kEqFreqs[kEqBands] = { 80.0f, 200.0f, 500.0f, 1000.0f, 2500.0f, 6000.0f, 12000.0f };
 inline constexpr const char* kEqLabels[kEqBands] = { "80", "200", "500", "1k", "2k5", "6k", "12k" };
 
+inline constexpr int kMixChannels = 4; // drums, moog, prophet, keys
+inline constexpr int kDelayNoteCount = 5;
+inline constexpr double kDelayNoteBeats[kDelayNoteCount] = { 1.0, 0.75, 0.5, 1.0 / 3.0, 0.25 };
+inline constexpr const char* kDelayNoteNames[kDelayNoteCount] = { "1/4", "1/8D", "1/8", "1/8T", "1/16" };
+
+inline double delayBeatsForNote(int note) noexcept
+{
+    return kDelayNoteBeats[(size_t) juce::jlimit(0, kDelayNoteCount - 1, note)];
+}
+
+struct ChannelFx
+{
+    bool lpOn = false;
+    float lp = 1.0f;       // 0 = ~80 Hz, 1 = ~18 kHz
+    bool hpOn = false;
+    float hp = 0.0f;       // 0 = ~20 Hz, 1 = ~4 kHz
+    bool delayOn = false;
+    float delayWet = 0.22f;
+    float delayFb = 0.32f;
+    int delayNote = 2;     // 1/8
+
+    bool reverbOn = false;
+    float reverbSize = 0.45f;
+    float reverbDecay = 0.55f;
+    float reverbWet = 0.38f;       // louder default mix
+    float reverbPreDelay = 0.12f;
+    float reverbWidth = 0.75f;
+    float reverbBass = 0.5f;       // 0 cut .. 0.5 flat .. 1 boost
+    float reverbMid = 0.5f;
+    float reverbTreble = 0.5f;
+    float reverbVolume = 0.85f;    // return / wet level
+
+    bool paradiseOn = false;
+    float paradiseInput = 0.70f;
+    float paradiseGate = 0.00f;
+    float paradisePre = 0.70f;     // Pre FX section level
+    float paradiseAmp = 0.78f;
+    float paradiseCab = 0.80f;     // Cab / amp out level
+    float paradiseRoom = 0.85f;    // host-side amp wet (0 dry .. 1 full guitar FX)
+    float paradiseOutput = 0.90f;  // main OUT volume
+    float paradiseLimit = 0.55f;   // output limiter amount / threshold style
+
+    bool driveOn = false;
+    float driveAmount = 0.25f; // 0 clean, 1 hard saturation
+    float driveTone = 0.55f;
+    float driveMix = 1.0f;
+
+    bool ringOn = false;
+    float ringFreq = 0.35f;    // normalized 20 Hz .. 4 kHz
+    float ringDepth = 1.0f;
+    float ringMix = 0.5f;
+
+    bool combOn = false;
+    float combFreq = 0.35f;    // normalized 55 Hz .. 3 kHz
+    float combFeedback = 0.45f;
+    float combMix = 0.5f;
+};
+
+struct ChannelFxLock
+{
+    std::optional<float> lp;
+    std::optional<float> hp;
+    std::optional<float> delayWet;
+    std::optional<float> delayFeedback;
+    std::optional<int> delayNote;
+    std::optional<float> reverbSize, reverbDecay, reverbWet;
+    std::optional<float> driveAmount, driveTone, driveMix;
+    std::optional<float> ringFreq, ringDepth, ringMix;
+    std::optional<float> combFreq, combFeedback, combMix;
+
+    bool empty() const noexcept
+    {
+        return ! lp.has_value() && ! hp.has_value() && ! delayWet.has_value()
+            && ! delayFeedback.has_value() && ! delayNote.has_value()
+            && ! reverbSize.has_value() && ! reverbDecay.has_value() && ! reverbWet.has_value()
+            && ! driveAmount.has_value() && ! driveTone.has_value() && ! driveMix.has_value()
+            && ! ringFreq.has_value() && ! ringDepth.has_value() && ! ringMix.has_value()
+            && ! combFreq.has_value() && ! combFeedback.has_value() && ! combMix.has_value();
+    }
+};
+
 struct MixSettings
 {
     float drumVol = 1.0f;
@@ -402,11 +488,10 @@ struct MixSettings
     float polyLeft = 1.0f;
     float polyRight = 1.0f;
     float busComp = 0.22f;
-    float busDelay = 0.0f;
     float masterVol = 1.0f;
-    float delayFeedback = 0.38f;
-    int delayNote = 2; // 1/8 — see MixBus::kDelayNoteNames
     std::array<float, kEqBands> eqGainDb {};
+    std::array<ChannelFx, kMixChannels> channelFx {};
+    std::array<std::array<ChannelFxLock, kSteps>, kMixChannels> fxLocks {};
 };
 
 inline constexpr int kMaxTakes = 12;

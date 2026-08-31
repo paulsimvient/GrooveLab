@@ -45,6 +45,20 @@ target_sources(GrooveLab PRIVATE
     Source/Audio/ExternalPluginHost.cpp
     Source/Audio/MixBus.h
     Source/Audio/MixBus.cpp
+    Source/Labs/Ensemble/EnsembleTypes.h
+    Source/Labs/Ensemble/EnsembleSession.h
+    Source/Labs/Ensemble/CandidateGenerator.h
+    Source/Labs/Ensemble/CandidateGenerator.cpp
+    Source/Labs/Ensemble/PerformanceAnalyzer.h
+    Source/Labs/Ensemble/PerformanceAnalyzer.cpp
+    Source/Labs/Ensemble/RelationshipScorer.h
+    Source/Labs/Ensemble/RelationshipScorer.cpp
+    Source/Labs/Ensemble/EnsembleGenerator.h
+    Source/Labs/Ensemble/EnsembleGenerator.cpp
+    Source/Labs/Ensemble/EnsembleSongBuilder.h
+    Source/Labs/Ensemble/EnsembleSongBuilder.cpp
+    Source/Labs/Ensemble/EnsembleView.h
+    Source/Labs/Ensemble/EnsembleView.cpp
     Source/UI/GrooveLookAndFeel.h
     Source/UI/MixStrip.h
     Source/UI/MixStrip.cpp
@@ -58,6 +72,10 @@ target_sources(GrooveLab PRIVATE
     Source/UI/EvolutionLab.cpp
     Source/UI/PatchBrowser.h
     Source/UI/PatchBrowser.cpp
+    Source/UI/PianoRoll.h
+    Source/UI/PianoRoll.cpp
+    Source/UI/InstrumentBrowser.h
+    Source/UI/InstrumentBrowser.cpp
     Source/UI/MainComponent.h
     Source/UI/MainComponent.cpp
     Source/Standalone/Main.cpp
@@ -68,6 +86,7 @@ target_compile_definitions(GrooveLab PUBLIC
     JUCE_USE_CURL=0
     JUCE_PLUGINHOST_VST3=1
     JUCE_PLUGINHOST_AU=1
+    GROOVELAB_LABS_ENSEMBLE=1
 )
 
 juce_add_binary_data(GrooveLabAssets SOURCES

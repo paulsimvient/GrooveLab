@@ -13,6 +13,11 @@
 #include "MixStrip.h"
 #include "EvolutionLab.h"
 #include "PatchBrowser.h"
+#include "PianoRoll.h"
+#include "InstrumentBrowser.h"
+#if GROOVELAB_LABS_ENSEMBLE
+#include "../Labs/Ensemble/EnsembleView.h"
+#endif
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::MenuBarModel,
@@ -57,7 +62,7 @@ private:
     static bool isVirtualMidiName(const juce::String&);
     static bool looksLikeKeyboardMidi(const juce::String&);
     void toggleTransport();
-    void setPage(int page); // 0 GRID, 1 EUCLIDEAN, 2 SONG
+    void setPage(int page); // 0 GRID, 1 EUCLIDEAN, 2 SONG, 3 ENSEMBLE
     void setLabPageVisible(bool on);
     juce::StringArray getMenuBarNames() override;
     juce::PopupMenu getMenuForIndex(int topLevelIndex, const juce::String& menuName) override;
@@ -85,6 +90,18 @@ private:
     void ensureArturiaMidiOutput();
     void showAllInstrumentEditors();
     void showInstrumentEditor(int channel);
+    void showInstrumentBrowser(int channel);
+    void loadInstrumentForChannel(int channel, const juce::File&);
+    void tryLoadCapitolChambers();
+    void tryLoadParadiseGuitarStudio();
+    void saveInstrumentDefaults();
+    void loadInstrumentDefaultsIntoState();
+    void routeExternalMidiToSelected(const juce::MidiBuffer& live,
+                                     juce::MidiBuffer& drums, juce::MidiBuffer& moog,
+                                     juce::MidiBuffer& keys, juce::MidiBuffer& poly) const;
+    void routeChannelMidi(const juce::MidiBuffer& src,
+                          juce::MidiBuffer& drums, juce::MidiBuffer& moog,
+                          juce::MidiBuffer& keys, juce::MidiBuffer& poly) const;
     void refreshMidiOutputs();
     void setSoundMode(int mode);
     void setMidiOutput(int deviceIndex);
@@ -102,6 +119,12 @@ private:
     void saveGrooveAs();
     void saveGrooveAsFile();
     void showLoadMenu();
+    void showFileMenu();
+    void showLabMenu();
+    void tapTempo();
+    static juce::File findCapitolChambersFile();
+    static juce::File findParadiseGuitarStudioFile();
+    static juce::PropertiesFile::Options instrumentPreferenceOptions();
     void loadGrooveFromFile(const juce::File&);
     void newGroove();
     void refreshVstKitUi(bool rebuildList);
@@ -121,6 +144,8 @@ private:
     groove::ExternalPluginHost synthHost;
     groove::ExternalPluginHost keysHost;
     groove::ExternalPluginHost polymaxHost;
+    std::array<groove::ExternalPluginHost, 4> capitolReverbHosts;
+    std::array<groove::ExternalPluginHost, 4> paradiseGuitarHosts;
     groove::MixBus mixBus;
     juce::AudioBuffer<float> drumStem, synthStem, keysStem, polyStem;
     std::unique_ptr<juce::MidiOutput> midiOutput;
@@ -134,25 +159,41 @@ private:
     GrooveLookAndFeel look;
     TorsoPage torsoPage { engine };
     SongPage songPage { engine };
+#if GROOVELAB_LABS_ENSEMBLE
+    groove::ensemble::EnsembleView ensembleView { engine };
+#endif
     SynthKeyboard synthKeyboard;
     MixStrip mixStrip;
+    PianoRoll pianoRoll { engine };
     std::unique_ptr<EvolutionWindow> evolutionWindow;
     std::unique_ptr<PatchBrowserWindow> prophetBrowser;
+    std::unique_ptr<InstrumentBrowserWindow> instrumentBrowser;
+
+    juce::MidiBuffer engineMidiScratch, drumMidiScratch, synthMidiScratch, liveMidiScratch;
+    juce::MidiBuffer keysMidiScratch, polyMidiScratch, laneMidiScratch, hardwareMidiScratch;
 
     juce::TextButton playButton { "PLAY" };
-    juce::TextButton resetButton { "RESET" };
+    juce::TextButton resetButton { "RST" };
     juce::TextButton captureButton { "CAPTURE" };
     juce::TextButton backButton { "BACK" };
     juce::TextButton auditionButton { "AUDITION" };
-    juce::TextButton performButton { "PERFORM" };
-    juce::TextButton commitPerformButton { "CAPTURE TEMP" };
+    juce::TextButton performButton { "PERF" };
+    juce::TextButton commitPerformButton { "KEEP" };
     juce::TextButton pageGridButton { "GRID" };
-    juce::TextButton pageT1Button { "EUCLIDEAN" };
+    juce::TextButton pageT1Button { "EUC" };
     juce::TextButton pageSongButton { "SONG" };
+#if GROOVELAB_LABS_ENSEMBLE
+    juce::TextButton pageEnsembleButton { "BEAT" };
+#endif
+    juce::TextButton fileMenuButton { "FILE" };
+    juce::TextButton labMenuButton { "LAB" };
     juce::TextButton saveButton { "SAVE" };
     juce::TextButton saveAsButton { "SAVE AS" };
     juce::TextButton loadButton { "LOAD" };
     juce::TextButton evolveButton { "EVOLVE" };
+    juce::TextButton tapTempoButton { "TAP" };
+    std::array<double, 5> tapTimesMs {};
+    int tapCount = 0;
     int midiOutIndex = -1;
     int midiInIndex = -1;
     juce::String midiInIdentifier;
@@ -175,8 +216,10 @@ private:
     // Explicit sound edit scope. STEP is the default: knob movement writes
     // per-step parameter locks. VOICE edits the selected track's base sound.
     juce::ComboBox soundScope;
-    juce::TextButton clearLocks { "CLEAR STEP SOUND" };
+    juce::TextButton clearLocks { "UNLOCK" };
+    juce::TextButton deleteNote { "DELETE NOTE" };
     juce::Label soundScopeLabel;
+    std::array<juce::TextButton, groove::paramCount> lockChips;
     juce::Slider velocity, midiNote, probability;
     juce::ComboBox ratchet, role;
 
@@ -193,7 +236,7 @@ private:
 
     juce::Label selectedLabel, evolutionStatus, footer;
     bool refreshing = false;
-    int currentPage = 0; // 0 GRID, 1 EUCLIDEAN, 2 SONG
+    int currentPage = 0; // 0 GRID, 1 EUCLIDEAN, 2 SONG, 3 ENSEMBLE
     bool midiDragOver = false;
     juce::MidiMessageCollector midiCollector;
 
