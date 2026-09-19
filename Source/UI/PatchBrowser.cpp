@@ -261,7 +261,7 @@ void PatchBrowser::showPatch(int hostIndex, bool load)
         tags.add(p.category);
     tags.addArray(p.types);
     tags.addArray(p.timbres);
-    tagRow.setText(tags.joinIntoString("   ·   "), juce::dontSendNotification);
+    tagRow.setText(tags.joinIntoString("   |   "), juce::dontSendNotification);
 }
 
 void PatchBrowser::stepFiltered(int delta)

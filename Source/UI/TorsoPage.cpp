@@ -407,7 +407,8 @@ void TorsoPage::playTrack(int track)
 juce::Rectangle<int> TorsoPage::pulsePad(int index) const
 {
     auto r = pulsePanel.reduced(16);
-    r.removeFromTop(48);
+    // Title line + mode-summary line above the gate pads.
+    r.removeFromTop(editingMidiLane() ? 56 : 48);
     const int cols = 8;
     const int rows = 4;
     const int gap = 6;
@@ -552,7 +553,7 @@ void TorsoPage::resized()
         return;
     }
 
-    // Row 1: VELOCITY · NOTE · PROB · REPEATS
+    // Row 1: VELOCITY | NOTE | PROB | REPEATS
     auto row1 = showSound ? sp.removeFromTop(juce::jlimit(48, 58, sp.getHeight() / 2)) : sp;
     const int gap = 8;
     const int colW = juce::jmax(72, (row1.getWidth() - gap * 3) / 4);
@@ -606,13 +607,13 @@ void TorsoPage::paint(juce::Graphics& g)
     {
         const auto& lane = st.midiLanes[(size_t) midiLane];
         const auto name = juce::String(groove::midiLaneName(midiLane));
-        panel(shapePanel, "CREATE  ·  " + name);
+        panel(shapePanel, "CREATE  |  " + name);
         const bool generatorMode = lane.rhythmMode == groove::RhythmMode::arp || lane.rhythmMode == groove::RhythmMode::walk || lane.rhythmMode == groove::RhythmMode::answer;
-        panel(pulsePanel, generatorMode ? "GENERATED NOTE PERFORMANCE  ·  ORIGINAL RECORDING STAYS INTACT"
-                                        : "EUCLIDEAN GATE  ·  SAME WINDOW AS DRUMS");
+        panel(pulsePanel, generatorMode ? "GENERATED NOTE PERFORMANCE  |  ORIGINAL RECORDING STAYS INTACT"
+                                        : "EUCLIDEAN GATE  |  SAME WINDOW AS DRUMS");
         if (! compactMelodicMode)
-            panel(stepPanel, generatorMode ? "PERFORMANCE SOURCE  ·  ARP / WALK / ANSWER READ THE ORIGINAL RECORDING"
-                                           : "MELODIC PERFORMANCE  ·  EUCLID PULSES ADVANCE THROUGH PIANO-ROLL NOTES");
+            panel(stepPanel, generatorMode ? "PERFORMANCE SOURCE  |  ARP / WALK / ANSWER READ THE ORIGINAL RECORDING"
+                                           : "MELODIC PERFORMANCE  |  EUCLID PULSES ADVANCE THROUGH PIANO-ROLL NOTES");
 
         g.setColour(juce::Colour(0xff8a7a68));
         g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
@@ -626,12 +627,15 @@ void TorsoPage::paint(juce::Graphics& g)
 
         g.setColour(juce::Colour(0xffffc38a));
         g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-        juce::String modeSummary = name + "  ·  " + groove::rhythmModeName(lane.rhythmMode);
+        juce::String modeSummary = name + "  |  " + groove::rhythmModeName(lane.rhythmMode);
         if (noteGenerator)
-            modeSummary += "  ·  rate " + juce::String(lane.generatorRate) + "  depth " + juce::String(lane.generatorDepth) + "  seed " + juce::String(lane.generatorSeed);
+            modeSummary += "  |  rate " + juce::String(lane.generatorRate) + "  depth " + juce::String(lane.generatorDepth) + "  seed " + juce::String(lane.generatorSeed);
         else
-            modeSummary += "  ·  " + juce::String(lane.euclidPulses) + "/" + juce::String(lane.euclidSteps) + "  rot " + juce::String(lane.euclidRotate);
-        g.drawText(modeSummary, pulsePanel.reduced(16, 12).removeFromTop(28), juce::Justification::centredLeft);
+            modeSummary += "  |  " + juce::String(lane.euclidPulses) + "/" + juce::String(lane.euclidSteps) + "  rot " + juce::String(lane.euclidRotate);
+        // Sit under the panel title — never on top of it.
+        auto summaryArea = pulsePanel.reduced(16, 8);
+        summaryArea.removeFromTop(28);
+        g.drawText(modeSummary, summaryArea.removeFromTop(20), juce::Justification::centredLeft);
 
         const int play = engine.currentStep();
         for (int step = 0; step < groove::kSteps; ++step)
@@ -688,12 +692,12 @@ void TorsoPage::paint(juce::Graphics& g)
             g.setColour(juce::Colour(0xffd8e5dd));
             g.setFont(juce::FontOptions(10.5f));
             const juce::String help = lane.rhythmMode == groove::RhythmMode::arp
-                ? "ARP reads the original recording as a note pool · source notes stay visible as ghosts"
+                ? "ARP reads the original recording as a note pool | source notes stay visible as ghosts"
                 : lane.rhythmMode == groove::RhythmMode::walk
-                    ? "WALK moves deterministically through the recorded note pool · change SEED for a new path"
+                    ? "WALK moves deterministically through the recorded note pool | change SEED for a new path"
                     : lane.rhythmMode == groove::RhythmMode::answer
-                        ? "ANSWER uses your phrase as a silent source and plays only the generated response · original stays visible as ghost notes"
-                        : "Piano roll supplies pitch/chords · Euclidean pulses advance through the recorded note events";
+                        ? "ANSWER uses your phrase as a silent source and plays only the generated response | original stays visible as ghost notes"
+                        : "Piano roll supplies pitch/chords | Euclidean pulses advance through the recorded note events";
             g.drawText(help, stepPanel.reduced(18).removeFromBottom(20), juce::Justification::centred);
         }
         if (! trackPanel.isEmpty())
@@ -737,9 +741,9 @@ void TorsoPage::paint(juce::Graphics& g)
     const auto& tr = st.tracks[t];
     const int play = engine.currentStepForTrack(t);
 
-    panel(shapePanel, "SHAPE  ·  " + juce::String(groove::voiceName(t)));
-    panel(pulsePanel, "RHYTHM  ·  CLICK TO TOGGLE  ·  SHIFT TO SELECT");
-    panel(stepPanel, "STEP EDIT  ·  " + juce::String(st.selectedStep + 1));
+    panel(shapePanel, "SHAPE  |  " + juce::String(groove::voiceName(t)));
+    panel(pulsePanel, "RHYTHM  |  CLICK TO TOGGLE  |  SHIFT TO SELECT");
+    panel(stepPanel, "STEP EDIT  |  " + juce::String(st.selectedStep + 1));
 
     g.setColour(juce::Colour(0xff8a7a68));
     g.setFont(juce::FontOptions(10.0f, juce::Font::bold));
@@ -1060,7 +1064,7 @@ void TorsoPage::filesDropped(const juce::StringArray& files, int, int)
             refreshFromEngine();
             if (onPatternChanged) onPatternChanged();
             if (onStatusMessage)
-                onStatusMessage("Loaded UJAM phrase · " + f.getFileName());
+                onStatusMessage("Loaded UJAM phrase | " + f.getFileName());
             repaint();
             return;
         }

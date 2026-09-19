@@ -319,11 +319,12 @@ struct MidiLane
     bool muted = false;
     // Melodic rhythm layer: STEP = notes play as written, EUCLID = pure gate,
     // HYBRID = Euclidean gate plus per-step force on/off overrides.
+    // Melodic lanes default to HYBRID 5-in-7 rotated by 2 (see makeDefaultMidiLanes).
     RhythmMode rhythmMode = RhythmMode::step;
     bool euclidEnabled = false; // legacy compatibility mirror of rhythmMode != STEP
-    int euclidSteps = 16;
-    int euclidPulses = 4;
-    int euclidRotate = 0;
+    int euclidSteps = 7;
+    int euclidPulses = 5;
+    int euclidRotate = 2;
     // Performance controls used when EUCLID/HYBRID advances through the lane's note material.
     float euclidVelocity = 1.0f;
     float euclidProbability = 1.0f;
@@ -396,6 +397,15 @@ inline std::array<MidiLane, kMidiLanes> makeDefaultMidiLanes()
     {
         lanes[(size_t) i].channel = midiLaneChannel(i);
         lanes[(size_t) i].name = midiLaneName(i);
+        if (i > 0)
+        {
+            // CREATE defaults for MOOG / MAXPOLY / KEYS: HYBRID 5/7 rot 2
+            lanes[(size_t) i].rhythmMode = RhythmMode::hybrid;
+            lanes[(size_t) i].euclidEnabled = true;
+            lanes[(size_t) i].euclidSteps = 7;
+            lanes[(size_t) i].euclidPulses = 5;
+            lanes[(size_t) i].euclidRotate = 2;
+        }
     }
     return lanes;
 }

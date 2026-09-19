@@ -1,11 +1,14 @@
 #pragma once
 #include <JuceHeader.h>
 #include <atomic>
+#include <cmath>
 #include <vector>
 #include "../Audio/GrooveEngine.h"
 #include "../Audio/DrumMidi.h"
 #include "../Audio/ExternalPluginHost.h"
 #include "../Audio/MixBus.h"
+#include "../Audio/ListenAnalyzer.h"
+#include "../Audio/BasslineGenerator.h"
 #include "GrooveLookAndFeel.h"
 #include "TorsoPage.h"
 #include "SongPage.h"
@@ -16,6 +19,7 @@
 #include "PianoRoll.h"
 #include "InstrumentBrowser.h"
 #include "InstrumentDock.h"
+#include "ListenMonitor.h"
 #if GROOVELAB_LABS_ENSEMBLE
 #include "../Labs/Ensemble/EnsembleView.h"
 #endif
@@ -128,6 +132,18 @@ private:
     void showFileMenu();
     void showLabMenu();
     void showViewMenu();
+    void beginListen();
+    void cancelListen();
+    void applyListenObservation(bool bumpSeed);
+    void regenerateBassFromObservation();
+    void clearListenBass();
+    void showListenMonitor(bool makeVisible = true);
+    ListenMonitorSnapshot makeListenMonitorSnapshot() const;
+    void ensureAudioInputEnabled();
+    void setAudioInputDevice(const juce::String& inputName);
+    void useBuiltInMicrophone();
+    void reopenAudioDeviceIfNeeded(bool force = false);
+    void armListenCapture();
     void tapTempo();
     static juce::File findCapitolChambersFile();
     static juce::File findParadiseGuitarStudioFile();
@@ -170,7 +186,89 @@ private:
     groove::ExternalPluginHost galaxyTapeHost;
     juce::dsp::Compressor<float> fxBusCompressor;
     groove::MixBus mixBus;
+    groove::ListenAnalyzer listenAnalyzer;
+    groove::MusicalObservation lastListenObservation;
+    groove::BassGenParams bassGenParams;
+    int lastListenLane = -1;
     juce::AudioBuffer<float> drumStem, synthStem, keysStem, polyStem, fxSendStem, fxReturnStem;
+    juce::AudioBuffer<float> inputScratch;
+    std::atomic<float> inputPeakLevel { 0.0f };
+    std::atomic<float> inputRmsLevel { 0.0f };
+    std::atomic<int> activeInputChannels { 0 };
+
+    // Direct CoreAudio input tap — independent of the output mix path.
+    struct InputProbe final : public juce::AudioIODeviceCallback
+    {
+        MainComponent* owner = nullptr;
+        void audioDeviceIOCallbackWithContext(const float* const* inputChannelData,
+                                              int numInputChannels,
+                                              float* const* /*outputChannelData*/,
+                                              int /*numOutputChannels*/,
+                                              int numSamples,
+                                              const juce::AudioIODeviceCallbackContext&) override
+        {
+            if (owner == nullptr || numSamples <= 0)
+                return;
+
+            float peak = 0.0f;
+            double sumSq = 0.0;
+            int live = 0;
+
+            // Stack mono mix — never depend on prepareToPlay sizing for metering.
+            constexpr int kMax = 4096;
+            float monoStack[kMax];
+            const int n = juce::jmin(numSamples, kMax);
+            juce::FloatVectorOperations::clear(monoStack, n);
+
+            for (int ch = 0; ch < numInputChannels; ++ch)
+            {
+                const float* src = inputChannelData != nullptr ? inputChannelData[ch] : nullptr;
+                if (src == nullptr)
+                    continue;
+                ++live;
+                for (int i = 0; i < n; ++i)
+                    monoStack[i] += src[i];
+            }
+
+            if (live > 1)
+            {
+                const float inv = 1.0f / (float) live;
+                for (int i = 0; i < n; ++i)
+                    monoStack[i] *= inv;
+            }
+
+            for (int i = 0; i < n; ++i)
+            {
+                const float s = monoStack[i];
+                peak = juce::jmax(peak, std::abs(s));
+                sumSq += (double) s * (double) s;
+            }
+
+            const float prevPeak = owner->inputPeakLevel.load();
+            owner->inputPeakLevel.store(peak > prevPeak ? peak : prevPeak * 0.92f + peak * 0.08f);
+            owner->inputRmsLevel.store((float) std::sqrt(sumSq / (double) juce::jmax(1, n)));
+            owner->activeInputChannels.store(live);
+
+            if (owner->listenAnalyzer.isArmed())
+            {
+                // Prefer persistent scratch when sized; else use stack.
+                float* dest = monoStack;
+                if (owner->inputScratch.getNumSamples() >= n)
+                {
+                    dest = owner->inputScratch.getWritePointer(0);
+                    juce::FloatVectorOperations::copy(dest, monoStack, n);
+                }
+                owner->listenAnalyzer.pushBlock(dest, n);
+            }
+        }
+
+        void audioDeviceAboutToStart(juce::AudioIODevice*) override {}
+        void audioDeviceStopped() override {}
+    };
+
+    InputProbe inputProbe;
+    bool micAudioPrimed = false;
+    int pendingListenBars = 0;
     std::unique_ptr<juce::MidiOutput> midiOutput;
     std::unique_ptr<juce::MidiInput> midiInput;
     std::unique_ptr<juce::FileChooser> fileChooser;
@@ -191,6 +289,7 @@ private:
     std::unique_ptr<MixerWindow> mixerWindow;
     PianoRoll pianoRoll { engine };
     InstrumentDock instrumentDock;
+    std::unique_ptr<ListenMonitorWindow> listenMonitorWindow;
     std::unique_ptr<EvolutionWindow> evolutionWindow;
     std::unique_ptr<PatchBrowserWindow> prophetBrowser;
     std::unique_ptr<InstrumentBrowserWindow> instrumentBrowser;

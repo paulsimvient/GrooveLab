@@ -765,6 +765,38 @@ bool GrooveEngine::deleteMidiLaneNote(int lane, int noteIndex)
     return true;
 }
 
+int GrooveEngine::clearMidiLaneNotes(int lane)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (lane < 0 || lane >= kMidiLanes)
+        return 0;
+
+    auto& laneState = grooveState.midiLanes[(size_t) lane];
+    const int removed = (int) laneState.notes.size();
+    laneState.notes.clear();
+    laneState.sourceNotes.clear();
+    laneState.sourceSnapshotValid = false;
+    // LISTEN writes plain step notes — leave the lane in STEP so ghosts/previews
+    // cannot keep drawing after a clear.
+    laneState.rhythmMode = RhythmMode::step;
+    laneState.euclidEnabled = false;
+
+    if (! grooveState.song.sections.empty())
+    {
+        const int i = juce::jlimit(0, (int) grooveState.song.sections.size() - 1, grooveState.song.current);
+        auto& secLane = grooveState.song.sections[(size_t) i].midiLanes[(size_t) lane];
+        secLane.notes.clear();
+        secLane.sourceNotes.clear();
+        secLane.sourceSnapshotValid = false;
+        secLane.rhythmMode = RhythmMode::step;
+        secLane.euclidEnabled = false;
+    }
+
+    syncCurrentSongSection();
+    saveAutosave();
+    return removed;
+}
+
 void GrooveEngine::updateMidiLaneNote(int lane, int noteIndex, const MidiLaneNote& note)
 {
     const juce::ScopedLock sl(stateLock);
@@ -1038,8 +1070,8 @@ bool GrooveEngine::importMidiFile(const juce::File& file, juce::String& error)
         grooveState.captureLiveToCurrentSection();
     }
 
-    journal.append("midi.import", file.getFileName() + " · " + juce::String(totalHits)
-                   + " hits · " + juce::String(length) + " steps");
+    journal.append("midi.import", file.getFileName() + " | " + juce::String(totalHits)
+                   + " hits | " + juce::String(length) + " steps");
     saveAutosave();
     error.clear();
     return true;

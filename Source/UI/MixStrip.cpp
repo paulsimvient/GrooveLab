@@ -2,7 +2,7 @@
 
 namespace
 {
-constexpr const char* kTitles[] = { "DRUMS  ·  CH1", "MOOG  ·  CH2", "MAXPOLY  ·  CH3", "KEYS  ·  CH4" };
+constexpr const char* kTitles[] = { "DRUMS  |  CH1", "MOOG  |  CH2", "MAXPOLY  |  CH3", "KEYS  |  CH4" };
 }
 
 MixStrip::MixStrip()
@@ -249,7 +249,7 @@ void MixStrip::setActiveMidiChannel(int channel){activeMidiChannel=(channel>=1&&
 void MixStrip::refreshChannelHighlight()
 {
     juce::Label* ls[]={&drumsTitle,&synthTitle,&polyTitle,&keysTitle}; for(int i=0;i<4;++i){const bool on=activeMidiChannel==i+1;ls[i]->setText(on ? (juce::String("▶  ") + kTitles[i]) : juce::String(kTitles[i]), juce::dontSendNotification);ls[i]->setColour(juce::Label::textColourId,on?juce::Colour(0xffe8f6ff):juce::Colour(0xff8aa0ae));}
-    busTitle.setText("FX BUS  ·  UADx AUX RETURNS",juce::dontSendNotification);
+    busTitle.setText("FX BUS  |  UADx AUX RETURNS",juce::dontSendNotification);
 }
 
 void MixStrip::paint(juce::Graphics& g)

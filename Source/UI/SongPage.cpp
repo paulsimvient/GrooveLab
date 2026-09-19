@@ -828,16 +828,16 @@ void SongPage::paintSectionTile(juce::Graphics& g, int index, juce::Rectangle<fl
     g.setFont(juce::FontOptions(12.0f));
     juce::String meta = juce::String(section.bars) + (section.bars == 1 ? " BAR" : " BARS");
     if (section.currentTake >= 0 && section.currentTake < (int) section.takes.size())
-        meta += "  ·  " + section.takes[(size_t) section.currentTake].label;
+        meta += "  |  " + section.takes[(size_t) section.currentTake].label;
     g.drawText(meta, inner.removeFromTop(16), juce::Justification::centredLeft);
 
     const int recLane = groove::midiLaneIndexForChannel(activeMidiChannel);
     if (selected && recLane >= 0)
     {
-        juce::String rec = "MIDI  ·  CH" + juce::String(activeMidiChannel)
+        juce::String rec = "MIDI  |  CH" + juce::String(activeMidiChannel)
             + "  " + juce::String(groove::midiLaneName(recLane));
         if (engine.isRecording())
-            rec = "REC  ·  " + rec;
+            rec = "REC  |  " + rec;
         g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
         g.setColour((engine.isRecording() ? juce::Colour(0xff3b1010)
                                          : juce::Colour(0xff071018)).withAlpha(alpha));
@@ -916,9 +916,9 @@ void SongPage::paintMidiLanes(juce::Graphics& g)
         g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
         g.setColour(armed ? juce::Colour(0xffe8f6ff) : juce::Colour(0xff8aa0ae));
         juce::String name = juce::String(groove::midiLaneName(lane))
-            + "  ·  CH" + juce::String(groove::midiLaneChannel(lane));
+            + "  |  CH" + juce::String(groove::midiLaneChannel(lane));
         if (recordingHere)
-            name += "  ·  REC";
+            name += "  |  REC";
         g.drawText(name, label.reduced(2.0f, 0.0f), juce::Justification::centredLeft);
 
         const auto& srcLanes = (current >= 0 && engine.isRecording())
@@ -975,16 +975,16 @@ void SongPage::paint(juce::Graphics& g)
         g.drawText(title, header.reduced(12, 0), juce::Justification::centredLeft);
     };
 
-    juce::String arrangeTitle = "ARRANGEMENT  ·  CLICK TO CUE  ·  SHIFT-CLICK JUMPS ON BEAT";
+    juce::String arrangeTitle = "ARRANGEMENT  |  CLICK TO CUE  |  SHIFT-CLICK JUMPS ON BEAT";
     panel(g, arrangePanel, arrangeTitle);
     const int recLane = groove::midiLaneIndexForChannel(activeMidiChannel);
-    juce::String lanesTitle = "MIDI LANES  ·  CLICK A NOTE  ·  RIGHT-CLICK OR DELETE REMOVES IT";
+    juce::String lanesTitle = "MIDI LANES  |  CLICK A NOTE  |  RIGHT-CLICK OR DELETE REMOVES IT";
     if (recLane >= 0)
     {
-        lanesTitle += "  ·  CH" + juce::String(activeMidiChannel)
+        lanesTitle += "  |  CH" + juce::String(activeMidiChannel)
             + "  " + juce::String(groove::midiLaneName(recLane));
         if (engine.isRecording())
-            lanesTitle += "  ·  RECORDING";
+            lanesTitle += "  |  RECORDING";
     }
     panel(g, lanesPanel, lanesTitle);
     panel(g, editPanel, "SECTION");
@@ -1045,24 +1045,24 @@ void SongPage::paint(juce::Graphics& g)
         const auto& section = song.sections[(size_t) current];
         status = juce::String(groove::songPartName(section.part));
         if (engine.isPlaying() && song.follow)
-            status += "  ·  BAR " + juce::String(engine.songBarInSection())
+            status += "  |  BAR " + juce::String(engine.songBarInSection())
                    + " / " + juce::String(section.bars);
         else if (song.follow)
-            status += "  ·  PLAY walks the arrangement";
+            status += "  |  PLAY walks the arrangement";
         else
-            status += "  ·  stays here until you cue another";
+            status += "  |  stays here until you cue another";
         const int queued = engine.queuedSongSection();
         if (queued >= 0 && queued < (int) song.sections.size())
-            status += "  ·  NEXT "
+            status += "  |  NEXT "
                 + juce::String(groove::songPartName(song.sections[(size_t) queued].part));
         const int beatJump = engine.pendingBeatJumpSection();
         if (beatJump >= 0 && beatJump < (int) song.sections.size())
-            status += "  ·  ON BEAT "
+            status += "  |  ON BEAT "
                 + juce::String(groove::songPartName(song.sections[(size_t) beatJump].part));
         if (engine.isRecording())
         {
             const int recLane = groove::midiLaneIndexForChannel(activeMidiChannel);
-            status = juce::String(groove::songPartName(section.part)) + "  ·  REC  ·  CH"
+            status = juce::String(groove::songPartName(section.part)) + "  |  REC  |  CH"
                 + juce::String(activeMidiChannel);
             if (recLane >= 0)
                 status += "  " + juce::String(groove::midiLaneName(recLane));

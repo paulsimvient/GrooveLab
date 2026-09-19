@@ -1281,7 +1281,7 @@ juce::String ExternalPluginHost::getKitName(int index) const
         const auto& e = patches[(size_t) juce::jlimit(0, (int) patches.size() - 1, index)];
         if (e.uniqueName)
             return e.name;
-        return e.category + " · " + e.name;
+        return e.category + " | " + e.name;
     }
     const juce::ScopedLock sl(pluginLock);
     if (plugin == nullptr)

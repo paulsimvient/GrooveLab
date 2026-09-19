@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "../Audio/DrumMidi.h"
+#include "MacMicrophoneAccess.h"
 #include <BinaryData.h>
 #include <initializer_list>
 
@@ -39,13 +40,13 @@ class AudioPreferencesPanel : public juce::Component
 {
 public:
     AudioPreferencesPanel(juce::AudioDeviceManager& dm, std::function<void()> saveDefaults)
-        : selector(dm, 0, 0, 2, 8, false, false, true, true), saveInstrumentDefaults(std::move(saveDefaults))
+        : selector(dm, 1, 2, 2, 8, false, false, true, true), saveInstrumentDefaults(std::move(saveDefaults))
     {
         heading.setText("AUDIO DEVICE", juce::dontSendNotification);
         heading.setJustificationType(juce::Justification::centredLeft);
         heading.setFont(juce::FontOptions(16.0f, juce::Font::bold));
         heading.setColour(juce::Label::textColourId, juce::Colour(0xffff8a22));
-        hint.setText("Output device, sample rate, and buffer size. Saved automatically.",
+        hint.setText("Input and output can be different devices (e.g. MacBook mic in, OB-4 out). Enable at least one Active Input Channel.",
                      juce::dontSendNotification);
         hint.setColour(juce::Label::textColourId, juce::Colour(0xff8aa0ae));
 
@@ -148,6 +149,36 @@ MainComponent::MainComponent()
 {
     addAndMakeVisible(pianoRoll);
     pianoRoll.setVisible(false);
+    pianoRoll.onListenClicked = [this]
+    {
+        if (listenAnalyzer.isArmed())
+            cancelListen();
+        else
+            beginListen();
+    };
+    pianoRoll.onRegenClicked = [this] { regenerateBassFromObservation(); };
+    pianoRoll.onSimplifyClicked = [this]
+    {
+        bassGenParams.simplify = juce::jmin(1.0f, bassGenParams.simplify + 0.25f);
+        bassGenParams.rootBias = juce::jmin(0.95f, bassGenParams.rootBias + 0.08f);
+        bassGenParams.movement = juce::jmax(0.05f, bassGenParams.movement - 0.12f);
+        regenerateBassFromObservation();
+    };
+    pianoRoll.onMoreMoveClicked = [this]
+    {
+        bassGenParams.movement = juce::jmin(1.0f, bassGenParams.movement + 0.2f);
+        bassGenParams.simplify = juce::jmax(0.0f, bassGenParams.simplify - 0.15f);
+        bassGenParams.rootBias = juce::jmax(0.35f, bassGenParams.rootBias - 0.08f);
+        regenerateBassFromObservation();
+    };
+    pianoRoll.onFollowRhythmClicked = [this]
+    {
+        bassGenParams.followRhythm = juce::jmin(1.0f, bassGenParams.followRhythm + 0.2f);
+        bassGenParams.simplify = juce::jmax(0.0f, bassGenParams.simplify - 0.1f);
+        regenerateBassFromObservation();
+    };
+    pianoRoll.onClearListenClicked = [this] { clearListenBass(); };
+    pianoRoll.onMonitorClicked = [this] { showListenMonitor(true); };
 
     addAndMakeVisible(instrumentDock);
     instrumentDock.setSelectedTarget(engine.state().selectedTarget);
@@ -245,7 +276,7 @@ MainComponent::MainComponent()
     bpm.setMouseDragSensitivity(180);
     bpm.onValueChange=[this]{ if(!refreshing){ engine.state().bpm=bpm.getValue(); mixStrip.setBpm(engine.state().bpm); engine.saveAutosave(); }};
     addAndMakeVisible(bpm);
-    tapTempoButton.setTooltip("Tap tempo · press T");
+    tapTempoButton.setTooltip("Tap tempo | press T");
     tapTempoButton.setWantsKeyboardFocus(false);
     tapTempoButton.onClick = [this] { tapTempo(); };
     addAndMakeVisible(tapTempoButton);
@@ -337,13 +368,13 @@ MainComponent::MainComponent()
     engine.setInternalSynthEnabled(false);
     soundMode.store(2);
     refreshMidiOutputs();
-    pluginHost.setEditorIdentity("DRUMS  ·  UJAM", { 40, 70 });
+    pluginHost.setEditorIdentity("DRUMS  |  UJAM", { 40, 70 });
     pluginHost.setPluginMidiChannel(1);
-    synthHost.setEditorIdentity("MOOG  ·  Mini-Moog", { 90, 110 });
+    synthHost.setEditorIdentity("MOOG  |  Mini-Moog", { 90, 110 });
     synthHost.setPluginMidiChannel(1);
-    keysHost.setEditorIdentity("KEYS  ·  Electra 88", { 140, 150 });
+    keysHost.setEditorIdentity("KEYS  |  Electra 88", { 140, 150 });
     keysHost.setPluginMidiChannel(1);
-    polymaxHost.setEditorIdentity("MAXPOLY  ·  PolyMAX", { 190, 190 });
+    polymaxHost.setEditorIdentity("MAXPOLY  |  PolyMAX", { 190, 190 });
     polymaxHost.setPluginMidiChannel(1);
 
     addAndMakeVisible(torsoPage);
@@ -536,7 +567,7 @@ MainComponent::MainComponent()
 
     playButton.onClick=[this]{ toggleTransport(); };
     recordButton.setClickingTogglesState(true);
-    recordButton.setTooltip("Record the currently selected instrument from any screen · shortcut R");
+    recordButton.setTooltip("Record the currently selected instrument from any screen | shortcut R");
     recordButton.onClick = [this]
     {
         const bool on = recordButton.getToggleState();
@@ -620,8 +651,8 @@ MainComponent::MainComponent()
         auto status = pluginHost.getKitName(id - 1);
         const auto style = pluginHost.getStyleName();
         if (style.isNotEmpty())
-            status += "  ·  " + style;
-        evolutionStatus.setText("DRUMS · " + status, juce::dontSendNotification);
+            status += "  |  " + style;
+        evolutionStatus.setText("DRUMS | " + status, juce::dontSendNotification);
     };
     mixStrip.drumPrev.onClick = [this]
     {
@@ -632,8 +663,8 @@ MainComponent::MainComponent()
         auto status = pluginHost.getKitName(pluginHost.getKitIndex());
         const auto style = pluginHost.getStyleName();
         if (style.isNotEmpty())
-            status += "  ·  " + style;
-        evolutionStatus.setText("DRUMS · " + status, juce::dontSendNotification);
+            status += "  |  " + style;
+        evolutionStatus.setText("DRUMS | " + status, juce::dontSendNotification);
     };
     mixStrip.drumNext.onClick = [this]
     {
@@ -644,8 +675,8 @@ MainComponent::MainComponent()
         auto status = pluginHost.getKitName(pluginHost.getKitIndex());
         const auto style = pluginHost.getStyleName();
         if (style.isNotEmpty())
-            status += "  ·  " + style;
-        evolutionStatus.setText("DRUMS · " + status, juce::dontSendNotification);
+            status += "  |  " + style;
+        evolutionStatus.setText("DRUMS | " + status, juce::dontSendNotification);
     };
     mixStrip.synthSound.onChange = [this]
     {
@@ -656,7 +687,7 @@ MainComponent::MainComponent()
         engine.state().lastSynthPatch = synthHost.getCurrentPatchName();
         if (engine.state().lastSynthPatch.isEmpty())
             engine.state().lastSynthPatch = synthHost.getKitName(id - 1);
-        evolutionStatus.setText("SYNTH · " + synthHost.getKitName(id - 1), juce::dontSendNotification);
+        evolutionStatus.setText("SYNTH | " + synthHost.getKitName(id - 1), juce::dontSendNotification);
         engine.saveAutosave();
     };
     mixStrip.synthPrev.onClick = [this]
@@ -666,7 +697,7 @@ MainComponent::MainComponent()
         if (engine.state().lastSynthPatch.isEmpty())
             engine.state().lastSynthPatch = synthHost.getKitName(synthHost.getKitIndex());
         refreshSynthKitUi(false);
-        evolutionStatus.setText("SYNTH · " + synthHost.getKitName(synthHost.getKitIndex()),
+        evolutionStatus.setText("SYNTH | " + synthHost.getKitName(synthHost.getKitIndex()),
                                 juce::dontSendNotification);
         engine.saveAutosave();
     };
@@ -675,7 +706,7 @@ MainComponent::MainComponent()
         if (pluginHost.isLoaded())
             pluginHost.showEditor();
         else
-            evolutionStatus.setText("DRUMS · load a kit first (Sound menu)", juce::dontSendNotification);
+            evolutionStatus.setText("DRUMS | load a kit first (Sound menu)", juce::dontSendNotification);
     };
     mixStrip.synthUi.onClick = [this]
     {
@@ -691,7 +722,7 @@ MainComponent::MainComponent()
         if (engine.state().lastSynthPatch.isEmpty())
             engine.state().lastSynthPatch = synthHost.getKitName(synthHost.getKitIndex());
         refreshSynthKitUi(false);
-        evolutionStatus.setText("SYNTH · " + synthHost.getKitName(synthHost.getKitIndex()),
+        evolutionStatus.setText("SYNTH | " + synthHost.getKitName(synthHost.getKitIndex()),
                                 juce::dontSendNotification);
         engine.saveAutosave();
     };
@@ -702,7 +733,7 @@ MainComponent::MainComponent()
         if (id <= 0) return;
         keysHost.setKitIndex(id - 1);
         storeCurrentKeysPatch();
-        evolutionStatus.setText("KEYS · " + keysHost.getKitName(id - 1), juce::dontSendNotification);
+        evolutionStatus.setText("KEYS | " + keysHost.getKitName(id - 1), juce::dontSendNotification);
         engine.saveAutosave();
     };
     mixStrip.keysPrev.onClick = [this]
@@ -710,7 +741,7 @@ MainComponent::MainComponent()
         keysHost.stepKit(-1);
         storeCurrentKeysPatch();
         refreshKeysKitUi(false);
-        evolutionStatus.setText("KEYS · " + keysHost.getKitName(keysHost.getKitIndex()),
+        evolutionStatus.setText("KEYS | " + keysHost.getKitName(keysHost.getKitIndex()),
                                 juce::dontSendNotification);
         engine.saveAutosave();
     };
@@ -719,7 +750,7 @@ MainComponent::MainComponent()
         keysHost.stepKit(1);
         storeCurrentKeysPatch();
         refreshKeysKitUi(false);
-        evolutionStatus.setText("KEYS · " + keysHost.getKitName(keysHost.getKitIndex()),
+        evolutionStatus.setText("KEYS | " + keysHost.getKitName(keysHost.getKitIndex()),
                                 juce::dontSendNotification);
         engine.saveAutosave();
     };
@@ -736,7 +767,7 @@ MainComponent::MainComponent()
         polymaxHost.stepKit(-1);
         storeCurrentPolyPatch();
         refreshPolyKitUi(false);
-        evolutionStatus.setText("MAXPOLY · " + polymaxHost.getKitName(polymaxHost.getKitIndex()),
+        evolutionStatus.setText("MAXPOLY | " + polymaxHost.getKitName(polymaxHost.getKitIndex()),
                                 juce::dontSendNotification);
         engine.saveAutosave();
     };
@@ -745,7 +776,7 @@ MainComponent::MainComponent()
         polymaxHost.stepKit(1);
         storeCurrentPolyPatch();
         refreshPolyKitUi(false);
-        evolutionStatus.setText("MAXPOLY · " + polymaxHost.getKitName(polymaxHost.getKitIndex()),
+        evolutionStatus.setText("MAXPOLY | " + polymaxHost.getKitName(polymaxHost.getKitIndex()),
                                 juce::dontSendNotification);
         engine.saveAutosave();
     };
@@ -768,7 +799,7 @@ MainComponent::MainComponent()
     deleteNote.onClick=[this]
     {
         engine.deleteNote(engine.state().selectedTrack, engine.state().selectedStep);
-        evolutionStatus.setText("Note deleted  ·  " + groove::voiceName(engine.state().selectedTrack)
+        evolutionStatus.setText("Note deleted  |  " + groove::voiceName(engine.state().selectedTrack)
                                     + " step " + juce::String(engine.state().selectedStep + 1),
                                 juce::dontSendNotification);
         refreshFromSelection();
@@ -796,7 +827,7 @@ MainComponent::MainComponent()
     }
     addSmallLabel(selectedLabel,"SELECTED"); selectedLabel.setFont(juce::FontOptions(13.0f,juce::Font::bold));
     addSmallLabel(evolutionStatus,"READY");
-    addSmallLabel(footer,"SAVE stores this groove  ·  SAVE AS makes a named copy  ·  ⌘S save  ·  ⌘⇧S save as  ·  ⌘O load");
+    addSmallLabel(footer,"SAVE stores this groove  |  SAVE AS makes a named copy  |  ⌘S save  |  ⌘⇧S save as  |  ⌘O load");
 
     for(int i=0;i<groove::paramCount;++i)
     {
@@ -870,10 +901,23 @@ MainComponent::MainComponent()
     const bool hadBuffer = settingsXml != nullptr
         && (settingsXml->hasAttribute("bufferSize")
             || settingsXml->hasAttribute("audioDeviceBufferSize"));
-    setAudioChannels(0, 2, settingsXml.get());
+    setAudioChannels(2, 2, settingsXml.get());
     if (! hadBuffer)
         preferLowLatencyBuffer();
+    ensureAudioInputEnabled();
+    inputProbe.owner = this;
+    deviceManager.addAudioCallback(&inputProbe);
     deviceManager.addChangeListener(this);
+    requestMacMicrophoneAccess([this](bool granted)
+    {
+        if (! granted)
+        {
+            evolutionStatus.setText("Microphone blocked — System Settings > Privacy & Security > Microphone",
+                                    juce::dontSendNotification);
+            return;
+        }
+        reopenAudioDeviceIfNeeded(true);
+    });
     if (settingsXml != nullptr)
     {
         midiInIdentifier = settingsXml->getStringAttribute("midiInputIdentifier");
@@ -942,6 +986,8 @@ MainComponent::~MainComponent()
     juce::MenuBarModel::setMacMainMenu(nullptr);
 #endif
     deviceManager.removeChangeListener(this);
+    deviceManager.removeAudioCallback(&inputProbe);
+    inputProbe.owner = nullptr;
     midiInput.reset();
     if (midiOutput != nullptr)
         midiOutput->stopBackgroundThread();
@@ -956,6 +1002,7 @@ MainComponent::~MainComponent()
     evolutionWindow.reset();
     prophetBrowser.reset();
     instrumentBrowser.reset();
+    listenMonitorWindow.reset();
     saveMixerWindowBounds();
     mixerWindow.reset();
     setLookAndFeel(nullptr);
@@ -976,6 +1023,7 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
     juce::dsp::ProcessSpec fxSpec { sampleRate, (juce::uint32) juce::jmax(1, samplesPerBlockExpected), 2 };
     fxBusCompressor.prepare(fxSpec);
     mixBus.prepare(sampleRate, samplesPerBlockExpected);
+    listenAnalyzer.prepare(sampleRate, samplesPerBlockExpected);
     const int n = juce::jmax(samplesPerBlockExpected, 512);
     drumStem.setSize(2, n, false, false, true);
     synthStem.setSize(2, n, false, false, true);
@@ -983,6 +1031,7 @@ void MainComponent::prepareToPlay(int samplesPerBlockExpected, double sampleRate
     polyStem.setSize(2, n, false, false, true);
     fxSendStem.setSize(2, n, false, false, true);
     fxReturnStem.setSize(2, n, false, false, true);
+    inputScratch.setSize(1, n, false, false, true);
     for (auto* midi : { &engineMidiScratch, &drumMidiScratch, &synthMidiScratch, &liveMidiScratch,
                         &keysMidiScratch, &polyMidiScratch, &laneMidiScratch, &hardwareMidiScratch })
         midi->ensureSize(32768);
@@ -1036,11 +1085,14 @@ void MainComponent::getNextAudioBlock(const juce::AudioSourceChannelInfo& info)
     // All stem storage is allocated in prepareToPlay(). Never resize in the audio callback.
     if (n > drumStem.getNumSamples() || n > synthStem.getNumSamples()
         || n > keysStem.getNumSamples() || n > polyStem.getNumSamples() || n > fxSendStem.getNumSamples()
-        || n > fxReturnStem.getNumSamples())
+        || n > fxReturnStem.getNumSamples() || n > inputScratch.getNumSamples())
     {
         view.clear();
         return;
     }
+
+    // Input metering + LISTEN capture happen in InputProbe (raw device callback).
+    // Do not read info.buffer here — that path is the output mix.
 
     juce::AudioBuffer<float> drums(drumStem.getArrayOfWritePointers(), 2, n);
     juce::AudioBuffer<float> synth(synthStem.getArrayOfWritePointers(), 2, n);
@@ -1268,7 +1320,7 @@ void MainComponent::setMidiInput(int deviceIndex)
     midiInIdentifier.clear();
     if (deviceIndex < 0 || deviceIndex >= midiInDevices.size())
     {
-        evolutionStatus.setText("MIDI IN · Off", juce::dontSendNotification);
+        evolutionStatus.setText("MIDI IN | Off", juce::dontSendNotification);
         return;
     }
     midiInIndex = deviceIndex;
@@ -1276,8 +1328,8 @@ void MainComponent::setMidiInput(int deviceIndex)
     midiInput = juce::MidiInput::openDevice(midiInDevices[deviceIndex].identifier, this);
     if (midiInput != nullptr)
         midiInput->start();
-    evolutionStatus.setText("MIDI IN · " + midiInDevices[deviceIndex].name
-                                + "  ·  LIVE → selected instrument",
+    evolutionStatus.setText("MIDI IN | " + midiInDevices[deviceIndex].name
+                                + "  |  LIVE → selected instrument",
                             juce::dontSendNotification);
 }
 
@@ -1318,9 +1370,9 @@ void MainComponent::handleIncomingMidiMessage(juce::MidiInput*, const juce::Midi
         else if (destChannel == groove::kMidiChKeys) dest = "KEYS";
 
         const auto noteName = juce::MidiMessage::getMidiNoteName(note, true, true, 3);
-        self->evolutionStatus.setText("MIDI IN · " + noteName
-                                        + " · " + juce::String(note)
-                                        + " · VEL " + juce::String(velocity)
+        self->evolutionStatus.setText("MIDI IN | " + noteName
+                                        + " | " + juce::String(note)
+                                        + " | VEL " + juce::String(velocity)
                                         + " → " + dest,
                                       juce::dontSendNotification);
     });
@@ -1431,7 +1483,7 @@ void MainComponent::menuItemSelected(int menuItemID, int)
     {
         setSoundMode(2);
         if (! pluginHost.isLoaded())
-            evolutionStatus.setText("Sound · Load UJAM / VST to host Hot",
+            evolutionStatus.setText("Sound | Load UJAM / VST to host Hot",
                                     juce::dontSendNotification);
         return;
     }
@@ -1500,7 +1552,7 @@ void MainComponent::tryLoadUjamHot()
     const auto file = vst3.exists() ? vst3 : au;
     if (! file.exists())
     {
-        evolutionStatus.setText("UJAM Hot not found — Sound menu · Load UJAM / VST", juce::dontSendNotification);
+        evolutionStatus.setText("UJAM Hot not found — Sound menu | Load UJAM / VST", juce::dontSendNotification);
         return;
     }
     if (pluginHost.isLoaded() && pluginHost.getFile() == file)
@@ -1518,7 +1570,7 @@ void MainComponent::tryLoadUjamHot()
                            deviceManager.getCurrentAudioDevice() != nullptr
                                ? deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
                                : 512);
-        evolutionStatus.setText("UJAM · Virtual Drummer Hot", juce::dontSendNotification);
+        evolutionStatus.setText("UJAM | Virtual Drummer Hot", juce::dontSendNotification);
         pluginHost.showEditor();
         applyStoredPluginKit();
         refreshVstKitUi(true);
@@ -1563,7 +1615,7 @@ void MainComponent::loadPluginFromFile(const juce::File& file)
                            deviceManager.getCurrentAudioDevice() != nullptr
                                ? deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
                                : 512);
-        evolutionStatus.setText("PLUGIN · " + pluginHost.getName(), juce::dontSendNotification);
+        evolutionStatus.setText("PLUGIN | " + pluginHost.getName(), juce::dontSendNotification);
         pluginHost.showEditor();
         refreshVstKitUi(true);
     }
@@ -1645,7 +1697,7 @@ void MainComponent::tryLoadCapitolChambers()
     if (!file.exists()) { evolutionStatus.setText("UADx Capitol Chambers not found", juce::dontSendNotification); return; }
     juce::String error;
     if (!capitolReverbHost.loadFromFile(file, error))
-        evolutionStatus.setText("Capitol Chambers load issue · " + error, juce::dontSendNotification);
+        evolutionStatus.setText("Capitol Chambers load issue | " + error, juce::dontSendNotification);
 }
 
 
@@ -1713,7 +1765,7 @@ void MainComponent::tryLoadParadiseGuitarStudio()
     if (!file.exists()) { evolutionStatus.setText("UADx Paradise Guitar Studio not found", juce::dontSendNotification); return; }
     juce::String error;
     if (!paradiseGuitarHost.loadFromFile(file, error))
-        evolutionStatus.setText("Paradise Guitar Studio load issue · " + error, juce::dontSendNotification);
+        evolutionStatus.setText("Paradise Guitar Studio load issue | " + error, juce::dontSendNotification);
 }
 
 static juce::File findNativeUaNamed(const juce::StringArray& terms)
@@ -1876,7 +1928,7 @@ void MainComponent::tryLoadKeys()
                          deviceManager.getCurrentAudioDevice() != nullptr
                              ? deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
                              : 512);
-        evolutionStatus.setText("KEYS · " + keysHost.getName() + " · CH"
+        evolutionStatus.setText("KEYS | " + keysHost.getName() + " | CH"
                                     + juce::String(groove::kMidiChKeys),
                                 juce::dontSendNotification);
         keysHost.showEditor();
@@ -1917,7 +1969,7 @@ void MainComponent::tryLoadPolymax()
                             deviceManager.getCurrentAudioDevice() != nullptr
                                 ? deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
                                 : 512);
-        evolutionStatus.setText("MAXPOLY · " + polymaxHost.getName() + " · CH"
+        evolutionStatus.setText("MAXPOLY | " + polymaxHost.getName() + " | CH"
                                     + juce::String(groove::kMidiChPoly),
                                 juce::dontSendNotification);
         polymaxHost.showEditor();
@@ -1968,7 +2020,7 @@ void MainComponent::applyLiveMidiChannel(int channel)
         mixerKeyboard.setTarget(target);
     }
 
-    evolutionStatus.setText("MIDI · CH" + juce::String(ch) + "  →  " + dest,
+    evolutionStatus.setText("MIDI | CH" + juce::String(ch) + "  →  " + dest,
                             juce::dontSendNotification);
 }
 
@@ -2069,7 +2121,7 @@ void MainComponent::tryLoadMiniMoog()
         file = findMiniMoogFile();
     if (! file.exists())
     {
-        evolutionStatus.setText("Mini-Moog not found — Sound menu · Load Mini-Moog",
+        evolutionStatus.setText("Mini-Moog not found — Sound menu | Load Mini-Moog",
                                 juce::dontSendNotification);
         return;
     }
@@ -2084,7 +2136,7 @@ void MainComponent::showInstrumentBrowser(int channel)
         instrumentBrowser = std::make_unique<InstrumentBrowserWindow>(look, "INSTRUMENTS");
 
     juce::String slot = "CH" + juce::String(channel);
-    if (channel == groove::kMidiChDrums) slot = "DRUMS · CH1";
+    if (channel == groove::kMidiChDrums) slot = "DRUMS | CH1";
     else if (channel == groove::kMidiChMoog) slot = "CH2";
     else if (channel == groove::kMidiChPoly) slot = "CH3";
     else if (channel == groove::kMidiChKeys) slot = "CH4";
@@ -2124,7 +2176,7 @@ void MainComponent::loadInstrumentForChannel(int channel, const juce::File& file
     juce::String error;
     if (! host->loadFromFile(file, error))
     {
-        evolutionStatus.setText(label + " · instrument failed: " + error, juce::dontSendNotification);
+        evolutionStatus.setText(label + " | instrument failed: " + error, juce::dontSendNotification);
         return;
     }
     *storedPath = file.getFullPathName();
@@ -2133,7 +2185,7 @@ void MainComponent::loadInstrumentForChannel(int channel, const juce::File& file
                   dev != nullptr ? dev->getCurrentBufferSizeSamples() : 512);
     engine.saveAutosave();
     selectMidiChannelFromUi(channel);
-    evolutionStatus.setText(label + " · " + host->getName(), juce::dontSendNotification);
+    evolutionStatus.setText(label + " | " + host->getName(), juce::dontSendNotification);
     host->showEditor();
     if (channel == groove::kMidiChDrums) refreshVstKitUi(true);
     else if (channel == groove::kMidiChPoly) refreshPolyKitUi(true);
@@ -2173,7 +2225,7 @@ void MainComponent::loadSynthFromFile(const juce::File& file)
                           deviceManager.getCurrentAudioDevice() != nullptr
                               ? deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
                               : 512);
-        evolutionStatus.setText("SYNTH · " + synthHost.getName(), juce::dontSendNotification);
+        evolutionStatus.setText("SYNTH | " + synthHost.getName(), juce::dontSendNotification);
         synthHost.showEditor();
         applyStoredSynthPatch();
         refreshSynthKitUi(true);
@@ -2237,7 +2289,7 @@ void MainComponent::applyLoadedSession()
                                    deviceManager.getCurrentAudioDevice() != nullptr
                                        ? deviceManager.getCurrentAudioDevice()->getCurrentBufferSizeSamples()
                                        : 512);
-                evolutionStatus.setText("LOADED · " + st.name + " · " + pluginHost.getName(),
+                evolutionStatus.setText("LOADED | " + st.name + " | " + pluginHost.getName(),
                                         juce::dontSendNotification);
         pluginHost.showEditor();
         applyStoredPluginKit();
@@ -2255,7 +2307,7 @@ void MainComponent::applyLoadedSession()
     }
     else if (pluginHost.isLoaded())
     {
-        evolutionStatus.setText("LOADED · " + st.name + " · " + pluginHost.getName(),
+        evolutionStatus.setText("LOADED | " + st.name + " | " + pluginHost.getName(),
                                 juce::dontSendNotification);
         applyStoredPluginKit();
         refreshVstKitUi(true);
@@ -2268,7 +2320,7 @@ void MainComponent::applyLoadedSession()
     if (soundMode.load() >= 2 && ! pluginHost.isLoaded())
     {
         setSoundMode(1);
-        evolutionStatus.setText("UJAM not loaded — using INTERNAL. Sound menu · Load UJAM / VST to host Hot.",
+        evolutionStatus.setText("UJAM not loaded — using INTERNAL. Sound menu | Load UJAM / VST to host Hot.",
                                 juce::dontSendNotification);
     }
 
@@ -2319,7 +2371,7 @@ void MainComponent::showInstrumentEditor(int channel)
     if (channel == groove::kMidiChDrums)
     {
         if (pluginHost.isLoaded()) pluginHost.showEditor();
-        else evolutionStatus.setText("DRUMS · load a kit first", juce::dontSendNotification);
+        else evolutionStatus.setText("DRUMS | load a kit first", juce::dontSendNotification);
         return;
     }
     if (channel == groove::kMidiChMoog)
@@ -2348,7 +2400,7 @@ void MainComponent::saveCurrentGroove()
     if (engine.saveStoredGroove(engine.state().name, error))
     {
         projectName.setText(engine.state().name, false);
-        evolutionStatus.setText("SAVED · " + engine.state().name, juce::dontSendNotification);
+        evolutionStatus.setText("SAVED | " + engine.state().name, juce::dontSendNotification);
     }
     else
     {
@@ -2381,7 +2433,7 @@ void MainComponent::saveGrooveAs()
         if (engine.saveStoredGroove(name, error))
         {
             projectName.setText(engine.state().name, false);
-            evolutionStatus.setText("SAVED AS · " + engine.state().name, juce::dontSendNotification);
+            evolutionStatus.setText("SAVED AS | " + engine.state().name, juce::dontSendNotification);
         }
         else
         {
@@ -2411,7 +2463,7 @@ void MainComponent::saveGrooveAsFile()
         if (engine.saveGrooveFile(file, error))
         {
             projectName.setText(engine.state().name, false);
-            evolutionStatus.setText("SAVED FILE · " + file.getFileName(), juce::dontSendNotification);
+            evolutionStatus.setText("SAVED FILE | " + file.getFileName(), juce::dontSendNotification);
         }
         else
             evolutionStatus.setText("Save failed: " + error, juce::dontSendNotification);
@@ -2427,7 +2479,7 @@ void MainComponent::loadGrooveFromFile(const juce::File& file)
         return;
     }
     applyLoadedSession();
-    evolutionStatus.setText("LOADED · " + engine.state().name, juce::dontSendNotification);
+    evolutionStatus.setText("LOADED | " + engine.state().name, juce::dontSendNotification);
 }
 
 void MainComponent::newGroove()
@@ -2591,7 +2643,7 @@ void MainComponent::drawPanel(juce::Graphics& g, juce::Rectangle<int> r, const j
 void MainComponent::runEvolution(groove::EvolutionEngine::Mode mode)
 {
     const auto r = engine.evolve(mode);
-    evolutionStatus.setText("EVOLVED · " + juce::String(r.appliedChanges) + " changes",
+    evolutionStatus.setText("EVOLVED | " + juce::String(r.appliedChanges) + " changes",
                             juce::dontSendNotification);
     refreshFromSelection();
     if (evolutionWindow != nullptr)
@@ -2651,13 +2703,18 @@ void MainComponent::preferLowLatencyBuffer()
 void MainComponent::changeListenerCallback(juce::ChangeBroadcaster*)
 {
     saveAudioSettings();
+    ensureAudioInputEnabled();
     refreshMidiInputs();
     if (midiInAuto && midiInput == nullptr)
         autoSelectMidiInput();
     if (auto* device = deviceManager.getCurrentAudioDevice())
-        evolutionStatus.setText("Audio · " + device->getName() + " · "
-                                + juce::String((int) device->getCurrentSampleRate()) + " Hz",
+    {
+        auto setup = deviceManager.getAudioDeviceSetup();
+        evolutionStatus.setText("Audio | in " + setup.inputDeviceName
+                                + " | out " + setup.outputDeviceName
+                                + " | " + juce::String((int) device->getCurrentSampleRate()) + " Hz",
                                 juce::dontSendNotification);
+    }
 }
 
 void MainComponent::saveMixerWindowBoundsForMode(bool compact)
@@ -2759,7 +2816,7 @@ void MainComponent::saveInstrumentDefaults()
     prefs.setValue("defaultCh3", engine.state().lastPolymaxPluginPath);
     prefs.setValue("defaultCh4", engine.state().lastKeysPluginPath);
     prefs.saveIfNeeded();
-    evolutionStatus.setText("PREFERENCES · instrument defaults saved", juce::dontSendNotification);
+    evolutionStatus.setText("PREFERENCES | instrument defaults saved", juce::dontSendNotification);
 }
 
 void MainComponent::loadInstrumentDefaultsIntoState()
@@ -2836,7 +2893,7 @@ bool MainComponent::importDroppedMidi(const juce::StringArray& files)
             continue;
         if (engine.importMidiFile(f, error))
         {
-            evolutionStatus.setText("Loaded UJAM phrase · " + f.getFileName(),
+            evolutionStatus.setText("Loaded UJAM phrase | " + f.getFileName(),
                                     juce::dontSendNotification);
             if (currentPage == 1)
                 torsoPage.refreshFromEngine();
@@ -2848,6 +2905,365 @@ bool MainComponent::importDroppedMidi(const juce::StringArray& files)
     }
     evolutionStatus.setText(error, juce::dontSendNotification);
     return false;
+}
+
+void MainComponent::beginListen()
+{
+    int lane = pianoRoll.getLane();
+    if (lane <= 0)
+    {
+        lane = 1;
+        pianoRoll.setLane(lane);
+        instrumentDock.setSelectedTarget(groove::unifiedTrackForMidiLane(lane));
+        engine.selectUnifiedTarget(groove::unifiedTrackForMidiLane(lane));
+        selectMidiChannelFromUi(groove::midiLaneChannel(lane));
+    }
+
+    pendingListenBars = pianoRoll.getListenBars();
+    showListenMonitor(true);
+
+    requestMacMicrophoneAccess([this](bool granted)
+    {
+        if (! granted)
+        {
+            pianoRoll.setListenArmed(false);
+            evolutionStatus.setText("LISTEN blocked — enable Microphone for Lil God Projector",
+                                    juce::dontSendNotification);
+            openMacMicrophonePrivacySettings();
+            return;
+        }
+        reopenAudioDeviceIfNeeded(false);
+        armListenCapture();
+    });
+}
+
+void MainComponent::armListenCapture()
+{
+    const int bars = juce::jmax(2, pendingListenBars > 0 ? pendingListenBars : pianoRoll.getListenBars());
+    const auto& st = engine.state();
+    const int spb = groove::meterStepsPerBar(st.meter);
+    const int quarters = (int) std::lround(groove::meterQuarterNotesPerBar(st.meter));
+    const int keyRoot = pianoRoll.getListenKeyRoot();
+    const auto scaleMode = (groove::ScaleMode) pianoRoll.getListenScaleMode();
+    const int seed = (int) (juce::Time::getMillisecondCounter() & 0xffff);
+    bassGenParams = {};
+    bassGenParams.seed = seed;
+    bassGenParams.keyRoot = keyRoot;
+    bassGenParams.scaleMode = scaleMode;
+    bassGenParams.lockKey = scaleMode != groove::ScaleMode::autoDetect;
+    listenAnalyzer.arm(bars, st.bpm, spb, juce::jmax(1, quarters));
+    pianoRoll.setListenArmed(true, 0.0f, true);
+    pianoRoll.setListenResult(false);
+    juce::String keyLabel = bassGenParams.lockKey
+        ? (juce::String(groove::pitchClassName(keyRoot)) + " " + groove::scaleModeName(scaleMode))
+        : "AUTO key";
+    evolutionStatus.setText("LISTEN | " + keyLabel + " | waiting for first note… | "
+                            + juce::String(bars) + " bars @ " + juce::String((int) st.bpm) + " BPM",
+                            juce::dontSendNotification);
+    if (! engine.isPlaying())
+        engine.setPlaying(true);
+}
+
+void MainComponent::reopenAudioDeviceIfNeeded(bool force)
+{
+    if (micAudioPrimed && ! force)
+        return;
+    auto setup = deviceManager.getAudioDeviceSetup();
+    deviceManager.closeAudioDevice();
+    deviceManager.setAudioDeviceSetup(setup, true);
+    ensureAudioInputEnabled();
+    micAudioPrimed = true;
+}
+
+void MainComponent::cancelListen()
+{
+    pendingListenBars = 0;
+    listenAnalyzer.reset();
+    pianoRoll.setListenArmed(false);
+    evolutionStatus.setText("LISTEN cancelled", juce::dontSendNotification);
+}
+
+void MainComponent::applyListenObservation(bool bumpSeed)
+{
+    const int captured = listenAnalyzer.getSamplesCaptured();
+    lastListenObservation = listenAnalyzer.takeObservation();
+    pianoRoll.setListenArmed(false);
+    pendingListenBars = 0;
+    if (! lastListenObservation.valid())
+    {
+        pianoRoll.setListenResult(false);
+        evolutionStatus.setText(captured <= 0
+                                    ? "LISTEN | captured 0 samples — mic not reaching LISTEN"
+                                    : "LISTEN | audio too quiet / no pitch — play louder into the mic",
+                                juce::dontSendNotification);
+        return;
+    }
+    if (bumpSeed)
+        ++bassGenParams.seed;
+    regenerateBassFromObservation();
+    evolutionStatus.setText(lastListenObservation.summary, juce::dontSendNotification);
+}
+
+void MainComponent::regenerateBassFromObservation()
+{
+    if (! lastListenObservation.valid())
+    {
+        pianoRoll.setListenResult(false);
+        evolutionStatus.setText("LISTEN first — no observation yet", juce::dontSendNotification);
+        return;
+    }
+
+    // Always pull current KEY/MODE from the UI so changing them + REGEN works.
+    // AUTO: most-heard pitch class becomes the root; major vs minor from triad scores.
+    const auto uiMode = (groove::ScaleMode) pianoRoll.getListenScaleMode();
+    // When AUTO detects a key, remember it for the UI — but do NOT lock/snap
+    // learned notes onto a scale (that was rewriting pitches incorrectly).
+    if (uiMode == groove::ScaleMode::autoDetect && lastListenObservation.hasKeyDetect)
+    {
+        bassGenParams.keyRoot = lastListenObservation.detectedKeyRoot;
+        bassGenParams.scaleMode = groove::ScaleMode::autoDetect;
+        bassGenParams.lockKey = false;
+        pianoRoll.setListenKeyRoot(bassGenParams.keyRoot);
+        for (auto& bar : lastListenObservation.barsObserved)
+        {
+            bar.rootPc = lastListenObservation.detectedKeyRoot;
+            bar.minor = lastListenObservation.detectedMinor;
+            bar.harmonyLabel = juce::String(groove::pitchClassName(bar.rootPc))
+                             + (bar.minor ? "m" : "");
+        }
+    }
+    else
+    {
+        bassGenParams.keyRoot = pianoRoll.getListenKeyRoot();
+        bassGenParams.scaleMode = uiMode;
+        // Manual KEY/MODE still does not rewrite note-for-note learns.
+        bassGenParams.lockKey = false;
+    }
+
+    int lane = pianoRoll.getLane();
+    if (lane <= 0) lane = 1;
+    lastListenLane = lane;
+
+    // Replace the whole lane proposal — LISTEN owns this lane's notes.
+    engine.clearMidiLaneNotes(lane);
+    engine.setMidiLaneMuted(lane, false);
+    // One trigger → one STEP note. Never invent HYBRID fills from a thin take.
+    engine.setMidiLaneRhythmMode(lane, groove::RhythmMode::step);
+    bassGenParams.allowInvent = false;
+
+    const int timeline = juce::jmax(1, engine.midiTimelineSteps());
+    const int listenSteps = juce::jmax(1, lastListenObservation.bars
+                                        * juce::jmax(1, lastListenObservation.stepsPerBar));
+    const auto notes = groove::BasslineGenerator::generate(lastListenObservation, bassGenParams, 36);
+    int written = 0;
+    for (const auto& n : notes)
+    {
+        int step = n.step;
+        if (listenSteps > timeline)
+            step = (int) std::lround((double) n.step * (double) (timeline - 1)
+                                     / (double) juce::jmax(1, listenSteps - 1));
+        step = juce::jlimit(0, timeline - 1, step);
+        engine.addMidiLaneNote(lane, step, n.note, n.velocity,
+                               juce::jmax(1, juce::jmin(n.lengthSteps, timeline - step)));
+        ++written;
+    }
+
+    pianoRoll.setLane(lane);
+    instrumentDock.setSelectedTarget(groove::unifiedTrackForMidiLane(lane));
+    engine.selectUnifiedTarget(groove::unifiedTrackForMidiLane(lane));
+    selectMidiChannelFromUi(groove::midiLaneChannel(lane));
+    pianoRoll.refresh();
+    pianoRoll.fitToNotes();
+    juce::String keyLabel = written > 0
+        ? ("LEARNED " + juce::String(written) + " notes")
+        : "NO NOTES — play louder / lower START THRESH";
+    if (lastListenObservation.hasKeyDetect)
+        keyLabel += "  |  key "
+                 + juce::String(groove::pitchClassName(lastListenObservation.detectedKeyRoot))
+                 + (lastListenObservation.detectedMinor ? "m" : "");
+    pianoRoll.setListenResult(written > 0, written, keyLabel + "  |  " + lastListenObservation.summary);
+    torsoPage.refreshFromEngine();
+    evolutionStatus.setText(keyLabel + "  |  " + lastListenObservation.summary,
+                            juce::dontSendNotification);
+}
+
+void MainComponent::clearListenBass()
+{
+    int lane = lastListenLane;
+    if (lane <= 0)
+        lane = pianoRoll.getLane();
+    if (lane <= 0)
+        lane = 1;
+
+    const int removed = engine.clearMidiLaneNotes(lane);
+    lastListenObservation = {};
+    lastListenLane = -1;
+
+    pianoRoll.setLane(lane);
+    pianoRoll.setListenResult(false);
+    pianoRoll.refresh();
+    pianoRoll.fitToNotes();
+    torsoPage.refreshFromEngine();
+    evolutionStatus.setText(removed > 0
+                                ? ("CLEARED | removed " + juce::String(removed) + " bass notes")
+                                : "CLEARED | lane already empty",
+                            juce::dontSendNotification);
+}
+
+ListenMonitorSnapshot MainComponent::makeListenMonitorSnapshot() const
+{
+    ListenMonitorSnapshot s;
+    s.peak = inputPeakLevel.load();
+    s.rms = inputRmsLevel.load();
+    s.activeInputCount = activeInputChannels.load();
+    s.listenArmed = listenAnalyzer.isArmed();
+    s.listenWaiting = listenAnalyzer.isWaitingForNote();
+    s.listenComplete = listenAnalyzer.isComplete();
+    s.listenProgress = listenAnalyzer.progress();
+    s.samplesCaptured = listenAnalyzer.getSamplesCaptured();
+    s.samplesNeeded = listenAnalyzer.getSamplesNeeded();
+    s.onsetCount = listenAnalyzer.getOnsetCount();
+    s.triggerSerial = listenAnalyzer.getTriggerSerial();
+    s.triggerKind = listenAnalyzer.getTriggerKind();
+    s.startThreshold = listenAnalyzer.getStartThreshold();
+    s.aboveThreshold = s.peak >= s.startThreshold;
+    s.hasObservation = lastListenObservation.valid();
+    if (s.hasObservation)
+        s.observation = lastListenObservation;
+
+    auto setup = deviceManager.getAudioDeviceSetup();
+    s.inputDevice = setup.inputDeviceName.isNotEmpty() ? setup.inputDeviceName : "(default input)";
+    s.outputDevice = setup.outputDeviceName.isNotEmpty() ? setup.outputDeviceName : "(default output)";
+
+    if (auto* type = deviceManager.getCurrentDeviceTypeObject())
+        s.availableInputs = type->getDeviceNames(true);
+
+    if (auto* device = deviceManager.getCurrentAudioDevice())
+    {
+        if (setup.inputDeviceName.isEmpty())
+            s.inputDevice = device->getName();
+        if (setup.outputDeviceName.isEmpty())
+            s.outputDevice = device->getName();
+        s.sampleRate = device->getCurrentSampleRate();
+        s.bufferSize = device->getCurrentBufferSizeSamples();
+        auto active = device->getActiveInputChannels();
+        juce::StringArray names;
+        auto inputs = device->getInputChannelNames();
+        for (int i = 0; i < active.getHighestBit() + 1; ++i)
+            if (active[i])
+                names.add(i < inputs.size() ? inputs[i] : ("In " + juce::String(i + 1)));
+        s.inputChannels = names.isEmpty() ? "none enabled" : names.joinIntoString(", ");
+        s.activeInputCount = juce::jmax(s.activeInputCount, active.countNumberOfSetBits());
+    }
+    return s;
+}
+
+void MainComponent::ensureAudioInputEnabled()
+{
+    auto setup = deviceManager.getAudioDeviceSetup();
+    if (setup.inputChannels.countNumberOfSetBits() > 0)
+        return;
+
+    setup.useDefaultInputChannels = false;
+    setup.inputChannels.clear();
+    setup.inputChannels.setRange(0, 2, true);
+    const auto err = deviceManager.setAudioDeviceSetup(setup, true);
+    if (err.isNotEmpty())
+        evolutionStatus.setText("Audio input enable failed | " + err, juce::dontSendNotification);
+}
+
+void MainComponent::setAudioInputDevice(const juce::String& inputName)
+{
+    if (inputName.isEmpty())
+        return;
+
+    auto setup = deviceManager.getAudioDeviceSetup();
+    setup.inputDeviceName = inputName;
+    setup.useDefaultInputChannels = false;
+    if (setup.inputChannels.countNumberOfSetBits() == 0)
+        setup.inputChannels.setRange(0, 2, true);
+
+    const auto err = deviceManager.setAudioDeviceSetup(setup, true);
+    ensureAudioInputEnabled();
+    saveAudioSettings();
+    if (err.isNotEmpty())
+        evolutionStatus.setText("Input switch failed | " + err, juce::dontSendNotification);
+    else
+        evolutionStatus.setText("INPUT | " + inputName + "  (output stays " + setup.outputDeviceName + ")",
+                                juce::dontSendNotification);
+}
+
+void MainComponent::useBuiltInMicrophone()
+{
+    juce::StringArray inputs;
+    if (auto* type = deviceManager.getCurrentDeviceTypeObject())
+        inputs = type->getDeviceNames(true);
+
+    juce::String chosen;
+    auto score = [](const juce::String& name) -> int
+    {
+        const auto l = name.toLowerCase();
+        int s = 0;
+        if (l.contains("macbook")) s += 100;
+        if (l.contains("built-in microphone")) s += 90;
+        if (l.contains("built-in mic")) s += 85;
+        if (l.contains("microphone")) s += 40;
+        if (l.contains("built-in")) s += 30;
+        if (l.contains("ob-") || l.contains("aggregate") || l.contains("zoom") || l.contains("scarlett"))
+            s -= 50;
+        return s;
+    };
+
+    int best = -999;
+    for (const auto& name : inputs)
+    {
+        const int sc = score(name);
+        if (sc > best)
+        {
+            best = sc;
+            chosen = name;
+        }
+    }
+
+    if (chosen.isEmpty())
+    {
+        evolutionStatus.setText("No built-in microphone found in CoreAudio device list",
+                                juce::dontSendNotification);
+        showPreferences();
+        return;
+    }
+
+    setAudioInputDevice(chosen);
+}
+
+void MainComponent::showListenMonitor(bool makeVisible)
+{
+    if (listenMonitorWindow == nullptr)
+    {
+        listenMonitorWindow = std::make_unique<ListenMonitorWindow>(
+            [this] { return makeListenMonitorSnapshot(); },
+            [this] { showPreferences(); },
+            [this](juce::String name) { setAudioInputDevice(name); },
+            [this] { useBuiltInMicrophone(); },
+            [] { openMacMicrophonePrivacySettings(); },
+            [this](float peak)
+            {
+                listenAnalyzer.setStartThreshold(peak);
+                evolutionStatus.setText("START THRESH | "
+                                        + juce::String(juce::Decibels::gainToDecibels(peak, -100.0f), 1)
+                                        + " dB",
+                                        juce::dontSendNotification);
+            },
+            [this] {});
+    }
+    if (makeVisible)
+    {
+        ensureAudioInputEnabled();
+        // Do not close/reopen the device here while LISTEN may be capturing.
+        // Startup / first grant already primes CoreAudio via reopenAudioDeviceIfNeeded.
+        listenMonitorWindow->setVisible(true);
+        listenMonitorWindow->toFront(true);
+    }
 }
 
 void MainComponent::tapTempo()
@@ -2871,7 +3287,7 @@ void MainComponent::tapTempo()
 
     if (tapCount < 2)
     {
-        evolutionStatus.setText("TAP TEMPO · tap T again", juce::dontSendNotification);
+        evolutionStatus.setText("TAP TEMPO | tap T again", juce::dontSendNotification);
         return;
     }
 
@@ -2894,7 +3310,7 @@ void MainComponent::tapTempo()
 
     const double tappedBpm = juce::jlimit(40.0, 260.0, 60000.0 / (totalMs / intervals));
     bpm.setValue(juce::roundToInt(tappedBpm), juce::sendNotificationSync);
-    evolutionStatus.setText("TAP TEMPO · " + juce::String(juce::roundToInt(tappedBpm)) + " BPM",
+    evolutionStatus.setText("TAP TEMPO | " + juce::String(juce::roundToInt(tappedBpm)) + " BPM",
                             juce::dontSendNotification);
 }
 
@@ -3065,7 +3481,7 @@ void MainComponent::setFocusMode(bool on)
 {
     focusMode = on;
     if (focusMode)
-        evolutionStatus.setText("FOCUS · F or Esc to restore", juce::dontSendNotification);
+        evolutionStatus.setText("FOCUS | F or Esc to restore", juce::dontSendNotification);
     resized();
     repaint();
 }
@@ -3080,7 +3496,7 @@ void MainComponent::refreshContextInspector()
     {
         const auto& tr = engine.state().tracks[(size_t) juce::jlimit(0, groove::kTracks - 1, target)];
         const char* mode = tr.rhythmMode == groove::RhythmMode::step ? "STEP" : (tr.rhythmMode == groove::RhythmMode::euclid ? "EUCLID" : "HYBRID");
-        contextDetail.setText(juce::String(mode) + " · " + juce::String(tr.pulses) + "/" + juce::String(tr.generatorSteps), juce::dontSendNotification);
+        contextDetail.setText(juce::String(mode) + " | " + juce::String(tr.pulses) + "/" + juce::String(tr.generatorSteps), juce::dontSendNotification);
         contextHint.setText("SEQ records + edits drums directly\nSONG handles section arrangement", juce::dontSendNotification);
         contextSecondary.setButtonText("DRUM UI");
         contextPrimary.setButtonText(tr.muted ? "UNMUTE" : "MUTE");
@@ -3090,7 +3506,7 @@ void MainComponent::refreshContextInspector()
         const int lane = groove::unifiedTrackMidiLane(target);
         const auto& ml = engine.state().midiLanes[(size_t) lane];
         const char* mode = groove::rhythmModeName(ml.rhythmMode);
-        contextDetail.setText(juce::String(mode) + " · " + juce::String(ml.euclidPulses) + "/" + juce::String(ml.euclidSteps), juce::dontSendNotification);
+        contextDetail.setText(juce::String(mode) + " | " + juce::String(ml.euclidPulses) + "/" + juce::String(ml.euclidSteps), juce::dontSendNotification);
         contextHint.setText(currentPage == 1 ? "Notes + rhythm + generation\nREC captures this instrument here" : "Selection persists across both workspaces", juce::dontSendNotification);
         contextSecondary.setButtonText(currentPage == 1 ? "FIT NOTES" : "PLUGIN");
         contextPrimary.setButtonText(ml.muted ? "UNMUTE" : "MUTE");
@@ -3113,8 +3529,8 @@ void MainComponent::bindSoundSlider(juce::Slider& s, groove::Param p)
                             editSelectedStep);
 
         evolutionStatus.setText(editSelectedStep
-            ? "STEP SOUND · " + juce::String(displayName(p)) + " locked"
-            : "VOICE SOUND · " + juce::String(displayName(p)) + " changed",
+            ? "STEP SOUND | " + juce::String(displayName(p)) + " locked"
+            : "VOICE SOUND | " + juce::String(displayName(p)) + " changed",
             juce::dontSendNotification);
         repaint();
     };
@@ -3430,12 +3846,12 @@ void MainComponent::showProphetBrowser()
     }
     if (prophetBrowser == nullptr)
     {
-        prophetBrowser = std::make_unique<PatchBrowserWindow>(polymaxHost, look, "MAXPOLY  ·  Patches");
+        prophetBrowser = std::make_unique<PatchBrowserWindow>(polymaxHost, look, "MAXPOLY  |  Patches");
         prophetBrowser->browser.onPatchChosen = [this]
         {
             storeCurrentPolyPatch();
             refreshPolyKitUi(true);
-            evolutionStatus.setText("MAXPOLY · " + polymaxHost.getCurrentPatchName(),
+            evolutionStatus.setText("MAXPOLY | " + polymaxHost.getCurrentPatchName(),
                                     juce::dontSendNotification);
             engine.saveAutosave();
         };
@@ -3459,8 +3875,8 @@ void MainComponent::toggleEvolutionWindow()
 void MainComponent::refreshFromSelection()
 {
     refreshing=true; const auto& st=engine.state();int t=st.selectedTrack,s=st.selectedStep;auto p=st.effectiveParams(t,s);const auto& ss=st.tracks[t].steps[s];const auto& tr=st.tracks[t];
-    selectedLabel.setText("SELECTED: " + groove::voiceName(t) + " · STEP " + juce::String(s+1)
-                          + (ss.hasAnyLock() ? " · STEP SOUND LOCKED" : " · follows VOICE SOUND"),
+    selectedLabel.setText("SELECTED: " + groove::voiceName(t) + " | STEP " + juce::String(s+1)
+                          + (ss.hasAnyLock() ? " | STEP SOUND LOCKED" : " | follows VOICE SOUND"),
                                juce::dontSendNotification);
     soundSliders[(int)groove::Param::pitch].setValue(p.pitchHz,juce::dontSendNotification);soundSliders[(int)groove::Param::decay].setValue(p.decayMs,juce::dontSendNotification);soundSliders[(int)groove::Param::transient].setValue(p.transient,juce::dontSendNotification);soundSliders[(int)groove::Param::noise].setValue(p.noise,juce::dontSendNotification);soundSliders[(int)groove::Param::filter].setValue(p.filter,juce::dontSendNotification);soundSliders[(int)groove::Param::drive].setValue(p.drive,juce::dontSendNotification);soundSliders[(int)groove::Param::space].setValue(p.space,juce::dontSendNotification);soundSliders[(int)groove::Param::blend].setValue(p.blend,juce::dontSendNotification);
     velocity.setValue(ss.velocity,juce::dontSendNotification);midiNote.setValue((double)st.effectiveMidiNote(t,s),juce::dontSendNotification);probability.setValue(ss.probability,juce::dontSendNotification);ratchet.setSelectedId(ss.ratchet,juce::dontSendNotification);role.setSelectedId((int)ss.role+1,juce::dontSendNotification);
@@ -3542,6 +3958,20 @@ void MainComponent::mouseDown(const juce::MouseEvent& e)
 }
 void MainComponent::timerCallback()
 {
+    if (listenAnalyzer.isArmed())
+    {
+        const bool waiting = listenAnalyzer.isWaitingForNote();
+        pianoRoll.setListenArmed(true, listenAnalyzer.progress(), waiting);
+        if (waiting)
+            evolutionStatus.setText("LISTEN | waiting for first note…", juce::dontSendNotification);
+        else if (listenAnalyzer.isCapturing())
+            evolutionStatus.setText("LISTEN | capturing "
+                                    + juce::String((int) std::round(listenAnalyzer.progress() * 100.0f)) + "%",
+                                    juce::dontSendNotification);
+    }
+    if (listenAnalyzer.isComplete())
+        applyListenObservation(false);
+
     static int midiPoll = 0;
     playButton.setButtonText(engine.isPlaying()?"STOP":"PLAY");
     recordButton.setToggleState(engine.isRecording(), juce::dontSendNotification);
@@ -3569,9 +3999,9 @@ void MainComponent::timerCallback()
     juce::String q = engine.isRecordQuantize()
         ? juce::String(groove::kQuantizeNoteNames[engine.getRecordQuantizeNote()]) : "FREE";
     juce::String page = currentPage == 1 ? "SEQ" : "SONG";
-    juce::String status = selectedTargetName() + "  ·  " + page + "  ·  " + mode
-        + "  ·  " + q + "  ·  " + (midiInput != nullptr ? "MIDI IN" : "NO MIDI")
-        + (engine.isRecording() ? "  ·  REC" : "") + (focusMode ? "  ·  FOCUS" : "");
+    juce::String status = selectedTargetName() + "  |  " + page + "  |  " + mode
+        + "  |  " + q + "  |  " + (midiInput != nullptr ? "MIDI IN" : "NO MIDI")
+        + (engine.isRecording() ? "  |  REC" : "") + (focusMode ? "  |  FOCUS" : "");
     footer.setText(status, juce::dontSendNotification);
     refreshContextInspector();
 

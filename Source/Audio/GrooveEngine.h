@@ -47,6 +47,7 @@ public:
     int currentMidiTimelineStep() const;
     int addMidiLaneNote(int lane, int step, int note, float velocity, int lengthSteps);
     bool deleteMidiLaneNote(int lane, int noteIndex);
+    int clearMidiLaneNotes(int lane); // returns how many notes were removed
     void updateMidiLaneNote(int lane, int noteIndex, const MidiLaneNote& note);
     void setVelocity(int track, int step, float value);
     void setProbability(int track, int step, float value);

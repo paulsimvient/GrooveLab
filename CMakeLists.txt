@@ -37,6 +37,8 @@ juce_add_gui_app(GrooveLab
     BUNDLE_ID "com.groovelab.app"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/Resources/GrooveLabIcon.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/Resources/GrooveLabIcon.png"
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "Lil God Projector needs the microphone for LISTEN and the Input Monitor."
 )
 
 target_sources(GrooveLab PRIVATE
@@ -45,6 +47,11 @@ target_sources(GrooveLab PRIVATE
     Source/Audio/ExternalPluginHost.cpp
     Source/Audio/MixBus.h
     Source/Audio/MixBus.cpp
+    Source/Audio/ListenTypes.h
+    Source/Audio/ListenAnalyzer.h
+    Source/Audio/ListenAnalyzer.cpp
+    Source/Audio/BasslineGenerator.h
+    Source/Audio/BasslineGenerator.cpp
     Source/Labs/Ensemble/EnsembleTypes.h
     Source/Labs/Ensemble/EnsembleSession.h
     Source/Labs/Ensemble/CandidateGenerator.h
@@ -74,6 +81,10 @@ target_sources(GrooveLab PRIVATE
     Source/UI/PatchBrowser.cpp
     Source/UI/PianoRoll.h
     Source/UI/PianoRoll.cpp
+    Source/UI/ListenMonitor.h
+    Source/UI/ListenMonitor.cpp
+    Source/UI/MacMicrophoneAccess.h
+    Source/UI/MacMicrophoneAccess.mm
     Source/UI/InstrumentBrowser.h
     Source/UI/InstrumentBrowser.cpp
     Source/UI/InstrumentDock.h
@@ -101,6 +112,10 @@ target_link_libraries(GrooveLab PRIVATE
     juce::juce_gui_extra
     GrooveLabAssets
 )
+
+if(APPLE)
+    target_link_libraries(GrooveLab PRIVATE "-framework AVFoundation" "-framework AppKit")
+endif()
 
 juce_add_plugin(GrooveLabPlugin
     COMPANY_NAME "Lil God Projector"

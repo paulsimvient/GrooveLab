@@ -143,7 +143,7 @@ void InstrumentBrowser::paintListBoxItem(int row, juce::Graphics& g, int w, int 
     g.drawText(e.name, 10, 2, w - 150, h / 2, juce::Justification::centredLeft, true);
     g.setColour(dim);
     g.setFont(juce::FontOptions(10.5f));
-    g.drawText(e.manufacturer + "  ·  " + e.format, 10, h / 2 - 1, w - 20, h / 2, juce::Justification::centredLeft, true);
+    g.drawText(e.manufacturer + "  |  " + e.format, 10, h / 2 - 1, w - 20, h / 2, juce::Justification::centredLeft, true);
 }
 
 void InstrumentBrowser::selectedRowsChanged(int) {}
@@ -206,7 +206,7 @@ InstrumentBrowserWindow::~InstrumentBrowserWindow()
 void InstrumentBrowserWindow::showBrowser(const juce::String& slotName,
                                            std::function<void(const juce::File&)> chooser)
 {
-    setName("INSTRUMENTS  ·  " + slotName);
+    setName("INSTRUMENTS  |  " + slotName);
     browser.onInstrumentChosen = [this, chooser = std::move(chooser)](const juce::File& f)
     {
         if (chooser) chooser(f);

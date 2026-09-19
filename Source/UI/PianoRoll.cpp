@@ -1,5 +1,6 @@
 #include "PianoRoll.h"
 #include <algorithm>
+#include <cmath>
 
 namespace
 {
@@ -34,7 +35,13 @@ PianoRoll::PianoRoll(groove::GrooveEngine& e) : engine(e)
 
     octaveDown.onClick = [this] { lowNote = juce::jmax(0, lowNote - 12); highNote = juce::jmax(lowNote + 12, highNote - 12); repaint(); };
     octaveUp.onClick = [this] { highNote = juce::jmin(127, highNote + 12); lowNote = juce::jmin(highNote - 12, lowNote + 12); repaint(); };
+    deleteButton.setTooltip("Delete the selected note (Delete / Backspace)");
     deleteButton.onClick = [this] { deleteSelected(); };
+    clearListenButton.setTooltip("Remove the bassline LISTEN wrote into this lane");
+    clearListenButton.onClick = [this]
+    {
+        if (onClearListenClicked) onClearListenClicked();
+    };
     resetButton.setTooltip("Restore the original recorded notes and return to STEP mode");
     resetButton.onClick = [this]
     {
@@ -71,12 +78,85 @@ PianoRoll::PianoRoll(groove::GrooveEngine& e) : engine(e)
     addAndMakeVisible(octaveDown);
     addAndMakeVisible(octaveUp);
     addAndMakeVisible(deleteButton);
+    addAndMakeVisible(clearListenButton);
     addAndMakeVisible(resetButton);
     addAndMakeVisible(fitButton);
     addAndMakeVisible(newTakeButton);
     addAndMakeVisible(keepButton);
     addAndMakeVisible(muteButton);
     addAndMakeVisible(recordButton);
+
+    listenStatus.setFont(juce::FontOptions(11.0f, juce::Font::bold));
+    listenStatus.setColour(juce::Label::textColourId, juce::Colour(0xff9ef0ff));
+    listenStatus.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(listenStatus);
+
+    listenBarsBox.addItem("2 bars", 2);
+    listenBarsBox.addItem("4 bars", 4);
+    listenBarsBox.addItem("8 bars", 8);
+    listenBarsBox.setSelectedId(2, juce::dontSendNotification);
+    listenBarsBox.setTooltip("How long LISTEN captures audio input");
+    addAndMakeVisible(listenBarsBox);
+
+    static const char* keyNames[] = { "C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B" };
+    for (int i = 0; i < 12; ++i)
+        listenKeyBox.addItem(keyNames[i], i + 1);
+    listenKeyBox.setSelectedId(1, juce::dontSendNotification); // C
+    listenKeyBox.setTooltip("Key center for generated bass");
+    addAndMakeVisible(listenKeyBox);
+
+    listenModeBox.addItem("AUTO", 1);
+    listenModeBox.addItem("MAJOR", 2);
+    listenModeBox.addItem("MINOR", 3);
+    listenModeBox.addItem("DORIAN", 4);
+    listenModeBox.addItem("PHRYGIAN", 5);
+    listenModeBox.addItem("LYDIAN", 6);
+    listenModeBox.addItem("MIXOLYDIAN", 7);
+    listenModeBox.addItem("LOCRIAN", 8);
+    listenModeBox.addItem("HARM MIN", 9);
+    listenModeBox.addItem("MEL MIN", 10);
+    listenModeBox.addItem("PENT MAJ", 11);
+    listenModeBox.addItem("PENT MIN", 12);
+    listenModeBox.addItem("BLUES", 13);
+    listenModeBox.setSelectedId(1, juce::dontSendNotification);
+    listenModeBox.setTooltip("AUTO follows what was heard; other modes lock bass to that scale");
+    auto applyKeyMode = [this]
+    {
+        if (listenHasResult && onRegenClicked)
+            onRegenClicked();
+        else
+            updateListenChrome();
+    };
+    listenKeyBox.onChange = applyKeyMode;
+    listenModeBox.onChange = applyKeyMode;
+    addAndMakeVisible(listenModeBox);
+
+    listenButton.setClickingTogglesState(true);
+    listenButton.setTooltip("Capture audio input, detect harmony/rhythm, write a bassline here (or MOOG if drums are selected)");
+    listenButton.onClick = [this]
+    {
+        if (onListenClicked) onListenClicked();
+    };
+    monitorButton.setTooltip("Open live input monitor — levels and what LISTEN is reading");
+    monitorButton.onClick = [this]
+    {
+        if (onMonitorClicked) onMonitorClicked();
+    };
+    regenButton.setTooltip("Regenerate bass from the last listen");
+    regenButton.onClick = [this] { if (onRegenClicked) onRegenClicked(); };
+    simplifyButton.setTooltip("Simpler bass (more roots)");
+    simplifyButton.onClick = [this] { if (onSimplifyClicked) onSimplifyClicked(); };
+    moveButton.setTooltip("More melodic movement");
+    moveButton.onClick = [this] { if (onMoreMoveClicked) onMoreMoveClicked(); };
+    followButton.setTooltip("Follow detected rhythm accents");
+    followButton.onClick = [this] { if (onFollowRhythmClicked) onFollowRhythmClicked(); };
+    addAndMakeVisible(listenButton);
+    addAndMakeVisible(monitorButton);
+    addAndMakeVisible(regenButton);
+    addAndMakeVisible(simplifyButton);
+    addAndMakeVisible(moveButton);
+    addAndMakeVisible(followButton);
+    updateListenChrome();
     refresh();
 }
 
@@ -90,11 +170,11 @@ void PianoRoll::setLane(int laneIndex)
 void PianoRoll::refresh()
 {
     if (isDrumMode())
-        title.setText("CH1  ·  DRUMS  ·  MIDI KEY VIEW", juce::dontSendNotification);
+        title.setText("CH1  |  DRUMS  |  MIDI KEY VIEW", juce::dontSendNotification);
     else if (const auto* l = laneState(); l != nullptr)
-        title.setText(laneTitle() + "  ·  " + groove::rhythmModeName(l->rhythmMode), juce::dontSendNotification);
+        title.setText(laneTitle() + "  |  " + groove::rhythmModeName(l->rhythmMode), juce::dontSendNotification);
     else
-        title.setText(laneTitle() + "  ·  NOTE SEQUENCER", juce::dontSendNotification);
+        title.setText(laneTitle() + "  |  NOTE SEQUENCER", juce::dontSendNotification);
     if (const auto* l = laneState(); l != nullptr)
     {
         if (selectedNote >= (int) l->notes.size()) selectedNote = -1;
@@ -125,10 +205,10 @@ groove::MidiLaneNote PianoRoll::noteAtIndex(int index) const
 
 juce::String PianoRoll::laneTitle() const
 {
-    if (isDrumMode()) return "CH1  ·  DRUMS";
+    if (isDrumMode()) return "CH1  |  DRUMS";
     const auto* l = laneState();
     if (l == nullptr) return "MIDI";
-    return "CH" + juce::String(l->channel) + "  ·  " + juce::String(groove::midiLaneName(lane));
+    return "CH" + juce::String(l->channel) + "  |  " + juce::String(groove::midiLaneName(lane));
 }
 
 bool PianoRoll::isBlackKey(int note)
@@ -140,32 +220,167 @@ bool PianoRoll::isBlackKey(int note)
 void PianoRoll::resized()
 {
     auto r = getLocalBounds();
-    headerArea = r.removeFromTop(44);
+    headerArea = r.removeFromTop(40);
+    listenArea = r.removeFromTop(72);
     inspectorArea = r.removeFromRight(230);
     velocityArea = r.removeFromBottom(112);
     pianoArea = r.removeFromLeft(76);
     gridArea = r;
 
-    auto h = headerArea.reduced(10, 7);
-    title.setBounds(h.removeFromLeft(250));
+    auto h = headerArea.reduced(10, 6);
+    title.setBounds(h.removeFromLeft(160));
+    h.removeFromLeft(4);
+    snapBox.setBounds(h.removeFromLeft(58));
+    h.removeFromLeft(4);
+    muteButton.setBounds(h.removeFromLeft(50));
+    h.removeFromLeft(4);
+    recordButton.setBounds(h.removeFromLeft(48));
     h.removeFromLeft(6);
-    snapBox.setBounds(h.removeFromLeft(72));
-    h.removeFromLeft(6);
-    muteButton.setBounds(h.removeFromLeft(58));
-    h.removeFromLeft(6);
-    recordButton.setBounds(h.removeFromLeft(62));
-    h.removeFromLeft(10);
-    octaveDown.setBounds(h.removeFromLeft(30));
-    octaveUp.setBounds(h.removeFromLeft(30));
-    deleteButton.setBounds(h.removeFromRight(72));
-    h.removeFromRight(6);
-    keepButton.setBounds(h.removeFromRight(58));
-    h.removeFromRight(6);
-    newTakeButton.setBounds(h.removeFromRight(82));
-    h.removeFromRight(5);
-    resetButton.setBounds(h.removeFromRight(66));
-    h.removeFromRight(5);
-    fitButton.setBounds(h.removeFromRight(78));
+    octaveDown.setBounds(h.removeFromLeft(28));
+    octaveUp.setBounds(h.removeFromLeft(28));
+    deleteButton.setBounds(h.removeFromRight(64));
+    h.removeFromRight(4);
+    keepButton.setBounds(h.removeFromRight(52));
+    h.removeFromRight(4);
+    newTakeButton.setBounds(h.removeFromRight(72));
+    h.removeFromRight(4);
+    resetButton.setBounds(h.removeFromRight(58));
+    h.removeFromRight(4);
+    fitButton.setBounds(h.removeFromRight(70));
+
+    auto strip = listenArea.reduced(8, 4);
+    auto row1 = strip.removeFromTop(30);
+    strip.removeFromTop(4);
+    auto row2 = strip;
+
+    listenButton.setBounds(row1.removeFromLeft(96));
+    row1.removeFromLeft(4);
+    monitorButton.setBounds(row1.removeFromLeft(56));
+    row1.removeFromLeft(6);
+    listenBarsBox.setBounds(row1.removeFromLeft(72));
+    row1.removeFromLeft(6);
+    listenKeyBox.setBounds(row1.removeFromLeft(54));
+    row1.removeFromLeft(4);
+    listenModeBox.setBounds(row1.removeFromLeft(108));
+    row1.removeFromLeft(6);
+    clearListenButton.setBounds(row1.removeFromRight(92));
+    row1.removeFromRight(4);
+    listenStatus.setBounds(row1);
+
+    regenButton.setBounds(row2.removeFromLeft(58));
+    row2.removeFromLeft(3);
+    simplifyButton.setBounds(row2.removeFromLeft(58));
+    row2.removeFromLeft(3);
+    moveButton.setBounds(row2.removeFromLeft(54));
+    row2.removeFromLeft(3);
+    followButton.setBounds(row2.removeFromLeft(62));
+}
+
+int PianoRoll::getListenBars() const
+{
+    return juce::jlimit(2, 8, listenBarsBox.getSelectedId());
+}
+
+int PianoRoll::getListenKeyRoot() const
+{
+    return juce::jlimit(0, 11, listenKeyBox.getSelectedId() - 1);
+}
+
+int PianoRoll::getListenScaleMode() const
+{
+    // Combo ids 1..13 map to ScaleMode 0..12
+    return juce::jlimit(0, 12, listenModeBox.getSelectedId() - 1);
+}
+
+void PianoRoll::setListenKeyRoot(int rootPc)
+{
+    listenKeyBox.setSelectedId(juce::jlimit(0, 11, rootPc) + 1, juce::dontSendNotification);
+}
+
+void PianoRoll::setListenArmed(bool armed, float progress01, bool waitingForNote)
+{
+    listenArmed = armed;
+    listenWaiting = armed && waitingForNote;
+    listenProgress = juce::jlimit(0.0f, 1.0f, progress01);
+    updateListenChrome();
+    repaint(listenArea);
+}
+
+void PianoRoll::setListenResult(bool hasResult, int noteCount, const juce::String& summary)
+{
+    listenHasResult = hasResult;
+    listenNoteCount = juce::jmax(0, noteCount);
+    listenSummary = summary;
+    updateListenChrome();
+    repaint();
+}
+
+void PianoRoll::updateListenChrome()
+{
+    listenButton.setToggleState(listenArmed, juce::dontSendNotification);
+    if (listenArmed && listenWaiting)
+    {
+        listenButton.setButtonText("WAIT FOR NOTE");
+        listenButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff8a5a18));
+        listenButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        listenButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        listenStatus.setText("Waiting for a note… play into the mic to start  |  click LISTEN to cancel",
+                             juce::dontSendNotification);
+        listenStatus.setColour(juce::Label::textColourId, juce::Colour(0xffffd28a));
+    }
+    else if (listenArmed)
+    {
+        listenButton.setButtonText("LISTENING " + juce::String((int) std::round(listenProgress * 100.0f)) + "%");
+        listenButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffb43328));
+        listenButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        listenButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        listenStatus.setText("Capturing note-for-note  |  keep playing  |  click LISTEN to cancel",
+                             juce::dontSendNotification);
+        listenStatus.setColour(juce::Label::textColourId, juce::Colour(0xffffc9a8));
+    }
+    else if (listenHasResult)
+    {
+        listenButton.setButtonText("LISTEN");
+        listenButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff167a8c));
+        listenButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        listenButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        juce::String msg = "Bass from audio  |  " + juce::String(listenNoteCount) + " notes";
+        if (listenSummary.isNotEmpty())
+            msg += "  |  " + listenSummary;
+        msg += "  |  CLEAR BASS removes them  |  DELETE removes selection";
+        listenStatus.setText(msg, juce::dontSendNotification);
+        listenStatus.setColour(juce::Label::textColourId, juce::Colour(0xff9ef0ff));
+    }
+    else
+    {
+        listenButton.setButtonText("LISTEN");
+        listenButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff1aa0b8));
+        listenButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+        listenButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+        listenStatus.setText("AUDIO IN -> BASS  |  waits for first note, then learns note-for-note  |  LISTEN / INPUT",
+                             juce::dontSendNotification);
+        listenStatus.setColour(juce::Label::textColourId, juce::Colour(0xff9ef0ff));
+    }
+
+    monitorButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff245a6a));
+    monitorButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+
+    const bool laneHasNotes = [&]()
+    {
+        if (const auto* l = laneState(); l != nullptr)
+            return ! l->notes.empty() || (l->sourceSnapshotValid && ! l->sourceNotes.empty());
+        return false;
+    }();
+    const bool canClear = listenHasResult || laneHasNotes;
+    regenButton.setEnabled(listenHasResult);
+    simplifyButton.setEnabled(listenHasResult);
+    moveButton.setEnabled(listenHasResult);
+    followButton.setEnabled(listenHasResult);
+    clearListenButton.setEnabled(canClear);
+    clearListenButton.setColour(juce::TextButton::buttonColourId,
+                                canClear ? juce::Colour(0xff8a3a18) : juce::Colour(0xff10202c));
+    clearListenButton.setColour(juce::TextButton::textColourOffId,
+                                canClear ? juce::Colours::white : mutedText);
 }
 
 void PianoRoll::fitNotes()
@@ -285,8 +500,24 @@ void PianoRoll::addNoteAt(juce::Point<int> p)
 
 void PianoRoll::deleteSelected()
 {
-    if (selectedNote < 0) return;
-    if (engine.deleteMidiLaneNote(lane, selectedNote)) selectedNote = -1;
+    if (selectedNote < 0)
+    {
+        if (listenHasResult && onClearListenClicked)
+            onClearListenClicked();
+        return;
+    }
+    if (engine.deleteMidiLaneNote(lane, selectedNote))
+    {
+        selectedNote = -1;
+        if (listenHasResult && listenNoteCount > 0)
+        {
+            --listenNoteCount;
+            if (listenNoteCount <= 0)
+                setListenResult(false);
+            else
+                updateListenChrome();
+        }
+    }
     repaint();
 }
 
@@ -421,7 +652,44 @@ bool PianoRoll::keyPressed(const juce::KeyPress& k)
 void PianoRoll::paint(juce::Graphics& g)
 {
     g.fillAll(bg);
-    g.setColour(panel); g.fillRect(headerArea); g.fillRect(inspectorArea); g.fillRect(velocityArea);
+    g.setColour(panel);
+    g.fillRect(headerArea);
+    g.fillRect(inspectorArea);
+    g.fillRect(velocityArea);
+
+    // Dedicated LISTEN strip so audio-in → bass is always visible.
+    {
+        const auto stripColour = listenArmed
+                              ? (listenWaiting ? juce::Colour(0xff3a2a10) : juce::Colour(0xff3a1814))
+                              : listenHasResult ? juce::Colour(0xff0d2c34)
+                              : juce::Colour(0xff0a2430);
+        g.setColour(stripColour);
+        g.fillRect(listenArea);
+        g.setColour(listenArmed
+                   ? (listenWaiting ? juce::Colour(0xffffb84a) : juce::Colour(0xffff6a4a))
+                   : listenHasResult ? juce::Colour(0xff3fd0e8)
+                   : juce::Colour(0xff1aa0b8));
+        g.fillRect(listenArea.getX(), listenArea.getBottom() - 2, listenArea.getWidth(), 2);
+
+        if (listenArmed && ! listenWaiting)
+        {
+            auto bar = listenArea.reduced(8, 0).removeFromBottom(4).withTrimmedBottom(2);
+            g.setColour(juce::Colour(0xff401810));
+            g.fillRoundedRectangle(bar.toFloat(), 2.0f);
+            g.setColour(juce::Colour(0xffff8a5a));
+            g.fillRoundedRectangle(bar.withWidth(juce::jmax(4, (int) std::round(bar.getWidth() * listenProgress))).toFloat(), 2.0f);
+        }
+        else if (listenArmed && listenWaiting)
+        {
+            // Soft pulse bar while waiting for the first note.
+            auto bar = listenArea.reduced(8, 0).removeFromBottom(4).withTrimmedBottom(2);
+            const float pulse = 0.35f + 0.35f * std::sin((float) juce::Time::getMillisecondCounter() * 0.008f);
+            g.setColour(juce::Colour(0xff403010));
+            g.fillRoundedRectangle(bar.toFloat(), 2.0f);
+            g.setColour(juce::Colour(0xffffb84a).withAlpha(0.55f + 0.35f * pulse));
+            g.fillRoundedRectangle(bar.withWidth(juce::jmax(4, (int) std::round(bar.getWidth() * pulse))).toFloat(), 2.0f);
+        }
+    }
 
     // Drums use the same key/timeline language as melodic lanes: each drum voice
     // is a labelled MIDI row, with the same 32-step horizontal time grid.
@@ -564,9 +832,12 @@ void PianoRoll::paint(juce::Graphics& g)
             }
             else
             {
-                g.setColour(i == selectedNote ? selectedGreen : noteGreen);
+                const auto fill = listenHasResult
+                    ? (i == selectedNote ? juce::Colour(0xffb8f7ff) : juce::Colour(0xff3fd0e8))
+                    : (i == selectedNote ? selectedGreen : noteGreen);
+                g.setColour(fill);
                 g.fillRoundedRectangle(r, 2.0f);
-                g.setColour(juce::Colour(0xff203611));
+                g.setColour(listenHasResult ? juce::Colour(0xff0a3a44) : juce::Colour(0xff203611));
                 g.drawRoundedRectangle(r, 2.0f, i == selectedNote ? 1.8f : 0.8f);
             }
         }
@@ -733,11 +1004,17 @@ void PianoRoll::paint(juce::Graphics& g)
         line("VELOCITY", juce::String(juce::jlimit(1, 127, (int) std::round(n.velocity * 127.0f))));
         line("START", juce::String(n.step + 1));
         g.setColour(noteGreen); g.setFont(juce::FontOptions(9.5f));
-        g.drawFittedText("Drag note = move pitch/time\nDrag right edge = length\nDrag velocity stem = velocity\nClick empty grid = create", ir.removeFromTop(86), juce::Justification::topLeft, 5);
+        g.drawFittedText("Drag note = move pitch/time\nDrag right edge = length\nDrag velocity stem = velocity\nDELETE / Backspace removes selection\nCLEAR BASS removes listen notes",
+                         ir.removeFromTop(100), juce::Justification::topLeft, 6);
     }
     else
     {
         g.setColour(mutedText); g.setFont(juce::FontOptions(10.5f));
-        g.drawFittedText("Click the piano roll to create a MIDI note. Note width is duration; velocity appears below.", ir.removeFromTop(70), juce::Justification::topLeft, 4);
+        juce::String help = "Click the piano roll to create a MIDI note. Note width is duration; velocity appears below.";
+        if (listenHasResult)
+            help = "Cyan notes came from LISTEN. CLEAR BASS removes all of them. Select one and press DELETE to remove just that note.";
+        else if (! listenArmed)
+            help = "Use the cyan LISTEN strip: pick bars, press LISTEN, play into audio input — a bassline is written here.";
+        g.drawFittedText(help, ir.removeFromTop(90), juce::Justification::topLeft, 5);
     }
 }

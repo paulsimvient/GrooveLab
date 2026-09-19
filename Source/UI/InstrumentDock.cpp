@@ -15,7 +15,7 @@ InstrumentDock::InstrumentDock()
     {
         auto& b = targetButtons[(size_t) i];
         b.setButtonText(nameForTarget(i));
-        b.setTooltip("Select globally · double-click opens instrument UI");
+        b.setTooltip("Select globally | double-click opens instrument UI");
         b.onClick = [this, i]
         {
             setSelectedTarget(i);

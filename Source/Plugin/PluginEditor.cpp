@@ -30,7 +30,7 @@ void GrooveLabAudioProcessorEditor::paint(juce::Graphics& g)
 
     g.setColour(juce::Colour(0xff7c9bad));
     g.setFont(juce::FontOptions(10.0f));
-    g.drawText("MIDI out uses UJAM Beatmaker kit notes  ·  route this track to Beatmaker / Virtual Drummer",
+    g.drawText("MIDI out uses UJAM Beatmaker kit notes  |  route this track to Beatmaker / Virtual Drummer",
                24, 44, 700, 18, juce::Justification::centredLeft);
 
     const auto& st = processor.engine().state();
