@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-echo "Lil God Projector v1.6.1 — piano roll JUCE 8 compile fix"
+echo "Lil God Projector — SEQ + SONG workspace"
 
 if ! command -v cmake >/dev/null 2>&1; then
   echo "CMake is required. Install it with: brew install cmake"
@@ -18,7 +18,8 @@ if ! xcode-select -p >/dev/null 2>&1; then
 fi
 
 JUCE_DIR="${JUCE_DIR:-$HOME/JUCE-8.0.4}"
-BUILD_DIR="${BUILD_DIR:-$HOME/LilGodProjector-v1.8.3-build}"
+# One canonical build tree — never spawn LilGodProjector-v*-build folders.
+BUILD_DIR="${BUILD_DIR:-$HOME/LilGodProjector-build}"
 
 if [ ! -f "$JUCE_DIR/CMakeLists.txt" ]; then
   echo "Fetching JUCE 8.0.4 into: $JUCE_DIR"
@@ -26,9 +27,18 @@ if [ ! -f "$JUCE_DIR/CMakeLists.txt" ]; then
   git clone --branch 8.0.4 --depth 1 https://github.com/juce-framework/JUCE.git "$JUCE_DIR"
 fi
 
-echo "Removing stale CMake state from: $BUILD_DIR"
-rm -rf "$BUILD_DIR"
+# Remove leftover versioned / alternate build trees so only one remains.
+shopt -s nullglob
+for stale in "$HOME"/LilGodProjector-v*-build "$HOME"/LilGodProjector-v1.8.3-build \
+             "$HOME"/GrooveLab-build "$HOME"/GrooveLabNative-build; do
+  if [ -e "$stale" ] && [ "$stale" != "$BUILD_DIR" ]; then
+    echo "Removing old build: $stale"
+    rm -rf "$stale"
+  fi
+done
+shopt -u nullglob
 
+echo "Building into: $BUILD_DIR"
 cmake -S . -B "$BUILD_DIR" -G "Unix Makefiles" \
   -DCMAKE_BUILD_TYPE=Release \
   -DFETCHCONTENT_SOURCE_DIR_JUCE="$JUCE_DIR"

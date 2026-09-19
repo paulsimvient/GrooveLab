@@ -125,6 +125,24 @@ juce::var lanesToVar(const std::array<MidiLane, kMidiLanes>& lanes)
         auto* o = new juce::DynamicObject();
         o->setProperty("channel", lane.channel);
         o->setProperty("name", lane.name);
+        o->setProperty("muted", lane.muted);
+        o->setProperty("rhythmMode", (int) lane.rhythmMode);
+        o->setProperty("euclidEnabled", lane.euclidEnabled);
+        o->setProperty("euclidSteps", lane.euclidSteps);
+        o->setProperty("euclidPulses", lane.euclidPulses);
+        o->setProperty("euclidRotate", lane.euclidRotate);
+        o->setProperty("euclidVelocity", lane.euclidVelocity);
+        o->setProperty("euclidProbability", lane.euclidProbability);
+        o->setProperty("euclidRepeats", lane.euclidRepeats);
+        o->setProperty("euclidOctave", lane.euclidOctave);
+        o->setProperty("euclidGate", lane.euclidGate);
+        o->setProperty("generatorRate", lane.generatorRate);
+        o->setProperty("generatorDepth", lane.generatorDepth);
+        o->setProperty("generatorSeed", lane.generatorSeed);
+        o->setProperty("sourceSnapshotValid", lane.sourceSnapshotValid);
+        juce::Array<juce::var> gateOverrides;
+        for (const auto ov : lane.gateOverrides) gateOverrides.add((int) ov);
+        o->setProperty("gateOverrides", gateOverrides);
         juce::Array<juce::var> notes;
         for (const auto& n : lane.notes)
         {
@@ -136,6 +154,17 @@ juce::var lanesToVar(const std::array<MidiLane, kMidiLanes>& lanes)
             notes.add(juce::var(no));
         }
         o->setProperty("notes", notes);
+        juce::Array<juce::var> sourceNotes;
+        for (const auto& n : lane.sourceNotes)
+        {
+            auto* no = new juce::DynamicObject();
+            no->setProperty("step", n.step);
+            no->setProperty("note", n.note);
+            no->setProperty("vel", n.velocity);
+            no->setProperty("len", juce::jmax(1, n.lengthSteps));
+            sourceNotes.add(juce::var(no));
+        }
+        o->setProperty("sourceNotes", sourceNotes);
         juce::Array<juce::var> patches;
         for (const auto& p : lane.patches)
         {
@@ -187,6 +216,28 @@ void lanesFromVar(std::array<MidiLane, kMidiLanes>& lanes, const juce::var& v)
             lane.channel = juce::jlimit(1, 16, (int) o->getProperty("channel"));
         if (o->getProperty("name").toString().isNotEmpty())
             lane.name = o->getProperty("name").toString();
+        if (! o->getProperty("muted").isVoid()) lane.muted = (bool) o->getProperty("muted");
+        auto laneModeVar = o->getProperty("rhythmMode");
+        if (! laneModeVar.isVoid())
+            lane.rhythmMode = (RhythmMode) juce::jlimit(0, 5, (int) laneModeVar);
+        if (! o->getProperty("euclidEnabled").isVoid()) lane.euclidEnabled = (bool) o->getProperty("euclidEnabled");
+        if (laneModeVar.isVoid()) lane.rhythmMode = lane.euclidEnabled ? RhythmMode::euclid : RhythmMode::step;
+        lane.euclidEnabled = lane.rhythmMode == RhythmMode::euclid || lane.rhythmMode == RhythmMode::hybrid;
+        if (! o->getProperty("euclidSteps").isVoid()) lane.euclidSteps = juce::jlimit(1, kSteps, (int) o->getProperty("euclidSteps"));
+        if (! o->getProperty("euclidPulses").isVoid()) lane.euclidPulses = juce::jlimit(0, lane.euclidSteps, (int) o->getProperty("euclidPulses"));
+        if (! o->getProperty("euclidRotate").isVoid()) lane.euclidRotate = (int) o->getProperty("euclidRotate");
+        if (! o->getProperty("euclidVelocity").isVoid()) lane.euclidVelocity = juce::jlimit(0.0f, 1.2f, (float) o->getProperty("euclidVelocity"));
+        if (! o->getProperty("euclidProbability").isVoid()) lane.euclidProbability = juce::jlimit(0.0f, 1.0f, (float) o->getProperty("euclidProbability"));
+        if (! o->getProperty("euclidRepeats").isVoid()) lane.euclidRepeats = juce::jlimit(1, 4, (int) o->getProperty("euclidRepeats"));
+        if (! o->getProperty("euclidOctave").isVoid()) lane.euclidOctave = juce::jlimit(-3, 3, (int) o->getProperty("euclidOctave"));
+        if (! o->getProperty("euclidGate").isVoid()) lane.euclidGate = juce::jlimit(0.05f, 1.0f, (float) o->getProperty("euclidGate"));
+        if (! o->getProperty("generatorRate").isVoid()) lane.generatorRate = juce::jlimit(1, 16, (int) o->getProperty("generatorRate"));
+        if (! o->getProperty("generatorDepth").isVoid()) lane.generatorDepth = juce::jlimit(1, 4, (int) o->getProperty("generatorDepth"));
+        if (! o->getProperty("generatorSeed").isVoid()) lane.generatorSeed = juce::jlimit(0, 31, (int) o->getProperty("generatorSeed"));
+        if (! o->getProperty("sourceSnapshotValid").isVoid()) lane.sourceSnapshotValid = (bool) o->getProperty("sourceSnapshotValid");
+        if (auto* ovs = o->getProperty("gateOverrides").getArray())
+            for (int j = 0; j < juce::jmin(kSteps, ovs->size()); ++j)
+                lane.gateOverrides[(size_t) j] = (StepOverrideMode) juce::jlimit(0, 2, (int) (*ovs)[j]);
         if (auto* notes = o->getProperty("notes").getArray())
         {
             for (const auto& item : *notes)
@@ -202,6 +253,24 @@ void lanesFromVar(std::array<MidiLane, kMidiLanes>& lanes, const juce::var& v)
                 lane.notes.push_back(n);
             }
         }
+        if (auto* sourceNotes = o->getProperty("sourceNotes").getArray())
+        {
+            lane.sourceNotes.clear();
+            for (const auto& item : *sourceNotes)
+            {
+                auto* no = item.getDynamicObject();
+                if (no == nullptr) continue;
+                MidiLaneNote n;
+                n.step = juce::jlimit(0, kSteps - 1, (int) no->getProperty("step"));
+                n.note = juce::jlimit(0, 127, (int) no->getProperty("note"));
+                n.velocity = juce::jlimit(0.0f, 1.0f, (float) no->getProperty("vel"));
+                n.lengthSteps = juce::jmax(1, (int) no->getProperty("len"));
+                lane.sourceNotes.push_back(n);
+            }
+        }
+        if (lane.sourceSnapshotValid && lane.sourceNotes.empty() && ! lane.notes.empty())
+            lane.sourceNotes = lane.notes;
+
         if (auto* patches = o->getProperty("patches").getArray())
         {
             for (const auto& item : *patches)
@@ -466,6 +535,31 @@ juce::var GrooveState::toVar() const
         for (int i = 0; i < kEqBands; ++i)
             eq.add(mix.eqGainDb[(size_t) i]);
         m->setProperty("eq", eq);
+        {
+            auto* sf = new juce::DynamicObject();
+            auto saveBoolArray = [sf](const char* key, const auto& values)
+            {
+                juce::Array<juce::var> a; for (int c=0;c<kMixChannels;++c) a.add(values[(size_t)c]); sf->setProperty(key, a);
+            };
+            auto saveFloatArray = [sf](const char* key, const auto& values)
+            {
+                juce::Array<juce::var> a; for (int c=0;c<kMixChannels;++c) a.add(values[(size_t)c]); sf->setProperty(key, a);
+            };
+            saveBoolArray("paradiseSendOn", mix.sharedFx.paradiseSendOn); saveFloatArray("paradiseSend", mix.sharedFx.paradiseSend);
+            saveBoolArray("centurySendOn", mix.sharedFx.centurySendOn); saveFloatArray("centurySend", mix.sharedFx.centurySend);
+            saveBoolArray("compressorSendOn", mix.sharedFx.compressorSendOn); saveFloatArray("compressorSend", mix.sharedFx.compressorSend);
+            saveBoolArray("galaxySendOn", mix.sharedFx.galaxySendOn); saveFloatArray("galaxySend", mix.sharedFx.galaxySend);
+            saveBoolArray("capitolSendOn", mix.sharedFx.capitolSendOn); saveFloatArray("capitolSend", mix.sharedFx.capitolSend);
+            // v2.1 compatibility fields are still written for safe round-tripping.
+            saveBoolArray("sendOn", mix.sharedFx.sendOn); saveFloatArray("send", mix.sharedFx.send);
+            sf->setProperty("returnLevel", mix.sharedFx.returnLevel);
+            sf->setProperty("paradiseOn", mix.sharedFx.paradiseOn); sf->setProperty("paradiseInput", mix.sharedFx.paradiseInput); sf->setProperty("paradiseGate", mix.sharedFx.paradiseGate); sf->setProperty("paradiseAmp", mix.sharedFx.paradiseAmp); sf->setProperty("paradiseRoom", mix.sharedFx.paradiseRoom); sf->setProperty("paradiseOutput", mix.sharedFx.paradiseOutput);
+            sf->setProperty("centuryOn", mix.sharedFx.centuryOn); sf->setProperty("centuryPreamp", mix.sharedFx.centuryPreamp); sf->setProperty("centuryLow", mix.sharedFx.centuryLow); sf->setProperty("centuryMid", mix.sharedFx.centuryMid); sf->setProperty("centuryMidFreq", mix.sharedFx.centuryMidFreq); sf->setProperty("centuryHigh", mix.sharedFx.centuryHigh); sf->setProperty("centuryComp", mix.sharedFx.centuryComp); sf->setProperty("centuryOutput", mix.sharedFx.centuryOutput);
+            sf->setProperty("compressorOn", mix.sharedFx.compressorOn); sf->setProperty("compThreshold", mix.sharedFx.compThreshold); sf->setProperty("compRatio", mix.sharedFx.compRatio); sf->setProperty("compAttack", mix.sharedFx.compAttack); sf->setProperty("compRelease", mix.sharedFx.compRelease); sf->setProperty("compMakeup", mix.sharedFx.compMakeup);
+            sf->setProperty("galaxyOn", mix.sharedFx.galaxyOn); sf->setProperty("galaxyDelay", mix.sharedFx.galaxyDelay); sf->setProperty("galaxyFeedback", mix.sharedFx.galaxyFeedback); sf->setProperty("galaxyEcho", mix.sharedFx.galaxyEcho); sf->setProperty("galaxyReverb", mix.sharedFx.galaxyReverb); sf->setProperty("galaxyTreble", mix.sharedFx.galaxyTreble); sf->setProperty("galaxyBass", mix.sharedFx.galaxyBass); sf->setProperty("galaxyInput", mix.sharedFx.galaxyInput);
+            sf->setProperty("capitolOn", mix.sharedFx.capitolOn); sf->setProperty("capitolSize", mix.sharedFx.capitolSize); sf->setProperty("capitolDecay", mix.sharedFx.capitolDecay); sf->setProperty("capitolPreDelay", mix.sharedFx.capitolPreDelay); sf->setProperty("capitolWidth", mix.sharedFx.capitolWidth); sf->setProperty("capitolBass", mix.sharedFx.capitolBass); sf->setProperty("capitolMid", mix.sharedFx.capitolMid); sf->setProperty("capitolTreble", mix.sharedFx.capitolTreble); sf->setProperty("capitolVolume", mix.sharedFx.capitolVolume);
+            m->setProperty("sharedFx", juce::var(sf));
+        }
         juce::Array<juce::var> fxArr;
         for (int c = 0; c < kMixChannels; ++c)
         {
@@ -538,9 +632,11 @@ juce::var GrooveState::toVar() const
     root->setProperty("bpm", bpm);
     root->setProperty("recordQuantize", recordQuantize);
     root->setProperty("recordQuantizeNote", recordQuantizeNote);
+    root->setProperty("recordOverwrite", recordOverwrite);
     root->setProperty("meter", (int) meter);
     root->setProperty("meterTransform", (int) meterTransform);
     root->setProperty("selectedTrack", selectedTrack);
+    root->setProperty("selectedTarget", selectedTarget);
     root->setProperty("selectedStep", selectedStep);
     root->setProperty("similarity", similarity);
     root->setProperty("surpriseBudget", surpriseBudget);
@@ -627,6 +723,8 @@ bool GrooveState::fromVar(const juce::var& v)
     auto quantNoteVar = root->getProperty("recordQuantizeNote");
     if (! quantNoteVar.isVoid())
         recordQuantizeNote = juce::jlimit(0, kQuantizeNoteCount - 1, (int) quantNoteVar);
+    auto overwriteVar = root->getProperty("recordOverwrite");
+    if (! overwriteVar.isVoid()) recordOverwrite = (bool) overwriteVar;
     auto meterVar = root->getProperty("meter");
     if (!meterVar.isVoid())
         meter = (Meter) juce::jlimit(0, kMeterCount - 1, (int) meterVar);
@@ -690,6 +788,48 @@ bool GrooveState::fromVar(const juce::var& v)
         {
             for (int i = 0; i < juce::jmin(kEqBands, eq->size()); ++i)
                 mix.eqGainDb[(size_t) i] = juce::jlimit(-12.0f, 12.0f, (float) eq->getUnchecked(i));
+        }
+        mix.sharedFx = {};
+        if (auto* sf = m->getProperty("sharedFx").getDynamicObject())
+        {
+            auto& x=mix.sharedFx;
+            auto loadBoolArray = [sf](const char* key, auto& values)
+            {
+                if(auto* a=sf->getProperty(key).getArray()) for(int c=0;c<juce::jmin(kMixChannels,a->size());++c) values[(size_t)c]=(bool)a->getUnchecked(c);
+            };
+            auto loadFloatArray = [sf,&take](const char* key, auto& values)
+            {
+                if(auto* a=sf->getProperty(key).getArray()) for(int c=0;c<juce::jmin(kMixChannels,a->size());++c) values[(size_t)c]=take(a->getUnchecked(c),values[(size_t)c],0.0f,1.0f);
+            };
+            loadBoolArray("sendOn", x.sendOn); loadFloatArray("send", x.send);
+            const bool hasPerFx = !sf->getProperty("paradiseSend").isVoid() || !sf->getProperty("centurySend").isVoid() || !sf->getProperty("galaxySend").isVoid() || !sf->getProperty("capitolSend").isVoid();
+            if (hasPerFx)
+            {
+                loadBoolArray("paradiseSendOn", x.paradiseSendOn); loadFloatArray("paradiseSend", x.paradiseSend);
+                loadBoolArray("centurySendOn", x.centurySendOn); loadFloatArray("centurySend", x.centurySend);
+                loadBoolArray("compressorSendOn", x.compressorSendOn); loadFloatArray("compressorSend", x.compressorSend);
+                loadBoolArray("galaxySendOn", x.galaxySendOn); loadFloatArray("galaxySend", x.galaxySend);
+                loadBoolArray("capitolSendOn", x.capitolSendOn); loadFloatArray("capitolSend", x.capitolSend);
+            }
+            else
+            {
+                // Upgrade v2.1's single track send to each new aux send.
+                for (int c=0;c<kMixChannels;++c)
+                {
+                    const bool on=x.sendOn[(size_t)c]; const float v=x.send[(size_t)c];
+                    x.paradiseSendOn[(size_t)c]=on; x.paradiseSend[(size_t)c]=v;
+                    x.centurySendOn[(size_t)c]=on; x.centurySend[(size_t)c]=v;
+                    x.compressorSendOn[(size_t)c]=on; x.compressorSend[(size_t)c]=v;
+                    x.galaxySendOn[(size_t)c]=on; x.galaxySend[(size_t)c]=v;
+                    x.capitolSendOn[(size_t)c]=on; x.capitolSend[(size_t)c]=v;
+                }
+            }
+            x.returnLevel=take(sf->getProperty("returnLevel"),x.returnLevel,0.0f,1.5f);
+            if(!sf->getProperty("paradiseOn").isVoid()) x.paradiseOn=(bool)sf->getProperty("paradiseOn"); x.paradiseInput=take(sf->getProperty("paradiseInput"),x.paradiseInput,0,1); x.paradiseGate=take(sf->getProperty("paradiseGate"),x.paradiseGate,0,1); x.paradiseAmp=take(sf->getProperty("paradiseAmp"),x.paradiseAmp,0,1); x.paradiseRoom=take(sf->getProperty("paradiseRoom"),x.paradiseRoom,0,1); x.paradiseOutput=take(sf->getProperty("paradiseOutput"),x.paradiseOutput,0,1);
+            if(!sf->getProperty("centuryOn").isVoid()) x.centuryOn=(bool)sf->getProperty("centuryOn"); x.centuryPreamp=take(sf->getProperty("centuryPreamp"),x.centuryPreamp,0,1); x.centuryLow=take(sf->getProperty("centuryLow"),x.centuryLow,0,1); x.centuryMid=take(sf->getProperty("centuryMid"),x.centuryMid,0,1); x.centuryMidFreq=take(sf->getProperty("centuryMidFreq"),x.centuryMidFreq,0,1); x.centuryHigh=take(sf->getProperty("centuryHigh"),x.centuryHigh,0,1); x.centuryComp=take(sf->getProperty("centuryComp"),x.centuryComp,0,1); x.centuryOutput=take(sf->getProperty("centuryOutput"),x.centuryOutput,0,1);
+            if(!sf->getProperty("compressorOn").isVoid()) x.compressorOn=(bool)sf->getProperty("compressorOn"); x.compThreshold=take(sf->getProperty("compThreshold"),x.compThreshold,0,1); x.compRatio=take(sf->getProperty("compRatio"),x.compRatio,0,1); x.compAttack=take(sf->getProperty("compAttack"),x.compAttack,0,1); x.compRelease=take(sf->getProperty("compRelease"),x.compRelease,0,1); x.compMakeup=take(sf->getProperty("compMakeup"),x.compMakeup,0,1);
+            if(!sf->getProperty("galaxyOn").isVoid()) x.galaxyOn=(bool)sf->getProperty("galaxyOn"); x.galaxyDelay=take(sf->getProperty("galaxyDelay"),x.galaxyDelay,0,1); x.galaxyFeedback=take(sf->getProperty("galaxyFeedback"),x.galaxyFeedback,0,1); x.galaxyEcho=take(sf->getProperty("galaxyEcho"),x.galaxyEcho,0,1); x.galaxyReverb=take(sf->getProperty("galaxyReverb"),x.galaxyReverb,0,1); x.galaxyTreble=take(sf->getProperty("galaxyTreble"),x.galaxyTreble,0,1); x.galaxyBass=take(sf->getProperty("galaxyBass"),x.galaxyBass,0,1); x.galaxyInput=take(sf->getProperty("galaxyInput"),x.galaxyInput,0,1);
+            if(!sf->getProperty("capitolOn").isVoid()) x.capitolOn=(bool)sf->getProperty("capitolOn"); x.capitolSize=take(sf->getProperty("capitolSize"),x.capitolSize,0,1); x.capitolDecay=take(sf->getProperty("capitolDecay"),x.capitolDecay,0,1); x.capitolPreDelay=take(sf->getProperty("capitolPreDelay"),x.capitolPreDelay,0,1); x.capitolWidth=take(sf->getProperty("capitolWidth"),x.capitolWidth,0,1); x.capitolBass=take(sf->getProperty("capitolBass"),x.capitolBass,0,1); x.capitolMid=take(sf->getProperty("capitolMid"),x.capitolMid,0,1); x.capitolTreble=take(sf->getProperty("capitolTreble"),x.capitolTreble,0,1); x.capitolVolume=take(sf->getProperty("capitolVolume"),x.capitolVolume,0,1);
         }
         mix.channelFx = {};
         mix.fxLocks = {};
@@ -781,6 +921,9 @@ bool GrooveState::fromVar(const juce::var& v)
     auto modeVar = root->getProperty("soundMode");
     if (!modeVar.isVoid()) soundMode = juce::jlimit(1, 3, (int) modeVar);
     selectedTrack = juce::jlimit(0, kTracks - 1, (int)root->getProperty("selectedTrack"));
+    auto selectedTargetVar = root->getProperty("selectedTarget");
+    selectedTarget = selectedTargetVar.isVoid() ? selectedTrack
+                                                : juce::jlimit(0, kUnifiedTracks - 1, (int) selectedTargetVar);
     selectedStep = juce::jlimit(0, kSteps - 1, (int)root->getProperty("selectedStep"));
 
     auto simVar = root->getProperty("similarity");

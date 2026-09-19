@@ -8,6 +8,7 @@ EnsembleView::EnsembleView(GrooveEngine& e)
     : engine(e)
 {
     setOpaque(true);
+    setWantsKeyboardFocus(true);
     recordButton.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffc62828));
     recordButton.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     recordButton.onClick = [this] { beginRecord(); };
@@ -575,10 +576,13 @@ void EnsembleView::mouseDown(const juce::MouseEvent& e)
         int track = -1, step = -1;
         if (hitTestGrid(e.getPosition(), track, step))
         {
-            if (session.phase == Phase::recording || e.mods.isShiftDown())
+            grabKeyboardFocus();
+            if (session.phase == Phase::recording)
                 toggleStep(track, step);
+            else if (e.mods.isShiftDown())
+                selectBeatStep(track, step, false);
             else
-                selectBeatStep(track, step, true);
+                toggleStep(track, step);
             dragTrack = track;
             dragStep = step;
             refreshSeedFromTracks();
@@ -586,21 +590,36 @@ void EnsembleView::mouseDown(const juce::MouseEvent& e)
             return;
         }
     }
+    // Section selection/arrangement lives only in SONG. PERFORM is now a
+    // submode of SEQ and never changes song sections from this surface.
     if (session.phase != Phase::ready)
         return;
-    const auto& sections = engine.state().song.sections;
-    for (int i = 0; i < (int) sections.size(); ++i)
-        if (sectionTile(i).contains(e.getPosition()))
-        {
-            const bool wasPlaying = engine.isPlaying();
-            if (wasPlaying)
-                engine.setPlaying(false);
-            engine.selectSongSection(i);
-            if (wasPlaying)
-                engine.setPlaying(true);
-            syncInspector();
-            return;
-        }
+}
+
+bool EnsembleView::deleteSelectedBeat()
+{
+    if (session.phase != Phase::ready)
+        return false;
+
+    const int track = juce::jlimit(0, kTracks - 1, engine.state().selectedTrack);
+    const int step = juce::jlimit(0, kSteps - 1, engine.state().selectedStep);
+    if (! engine.isResolvedHit(track, step))
+        return false;
+
+    engine.deleteNote(track, step);
+    clearSeedHit(session.seed, track, step);
+    propagateFromVerse();
+    refreshSeedFromTracks();
+    syncInspector();
+    repaint();
+    return true;
+}
+
+bool EnsembleView::keyPressed(const juce::KeyPress& key)
+{
+    if (key == juce::KeyPress::deleteKey || key == juce::KeyPress::backspaceKey)
+        return deleteSelectedBeat();
+    return false;
 }
 
 void EnsembleView::mouseDrag(const juce::MouseEvent& e)
@@ -728,7 +747,7 @@ void EnsembleView::paint(juce::Graphics& g)
         g.drawText("Open SONG to play the parts. RECORD AGAIN makes a new one.",
                    header, juce::Justification::centredLeft);
     else if (suggested)
-        g.drawText("Click any cell to add or delete. Hats: 1/4, 1/2, or 16th. Open hat sits on 4.",
+        g.drawText("Click cells to perform/edit. SONG owns section arrangement; SEQ/PERFORM stays on the current section.",
                    header, juce::Justification::centredLeft);
     else if (recording)
     {
@@ -765,29 +784,7 @@ void EnsembleView::paint(juce::Graphics& g)
         g.drawText("ROLE", roleR.removeFromTop(16), juce::Justification::centred);
     }
 
-    if (suggested)
-    {
-        const auto& sections = engine.state().song.sections;
-        const int current = engine.state().song.current;
-        for (int i = 0; i < (int) sections.size(); ++i)
-        {
-            const auto tile = sectionTile(i);
-            const bool on = (i == current);
-            g.setColour(on ? juce::Colour(0xff1a4a62) : juce::Colour(0xff10202c));
-            g.fillRoundedRectangle(tile.toFloat(), 6.0f);
-            g.setColour(on ? juce::Colour(0xff7ac8ff) : juce::Colour(0xff2c4454));
-            g.drawRoundedRectangle(tile.toFloat(), 6.0f, on ? 2.0f : 1.0f);
-            auto text = tile.reduced(4, 6);
-            g.setColour(on ? juce::Colours::white : juce::Colour(0xffd5ebf7));
-            g.setFont(juce::FontOptions(13.0f, juce::Font::bold));
-            g.drawText(songPartName(sections[(size_t) i].part),
-                       text.removeFromTop(22), juce::Justification::centred);
-            g.setColour(juce::Colour(0xff8aa0ae));
-            g.setFont(juce::FontOptions(11.0f));
-            g.drawText(dynamicLevelName(dynamicLevelForPart(sections[(size_t) i].part)),
-                       text, juce::Justification::centred);
-        }
-    }
+
 }
 
 void EnsembleView::resized()
@@ -796,8 +793,7 @@ void EnsembleView::resized()
     r.removeFromTop(86);
     auto footer = r.removeFromBottom(44);
     r.removeFromBottom(12);
-    partsArea = r.removeFromBottom(72);
-    r.removeFromBottom(10);
+    partsArea = {}; // section arrangement lives in SONG
     inspectorArea = r.removeFromBottom(78);
     r.removeFromBottom(10);
     gridArea = r;

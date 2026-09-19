@@ -1,3 +1,12 @@
+
+## v3.3 melodic creation
+
+Melodic tracks now support STEP, EUCLID, HYBRID, ARP, and WALK from the shared SEQ workspace. ARP and WALK use your recorded MIDI as a non-destructive note pool. When a generated mode is active, the original performance remains visible as transparent ghost notes while the generated performance is drawn solid. Press RESET in the piano roll to restore the original recording and return to STEP.
+
+# Lil God Projector v3.2 — Workspace Refinement
+
+This build consolidates the UI around three levels: global transport/track selection, SEQ/SONG/BEAT workspace, and contextual inspector/mixer/plugin detail. See `V32_WORKSPACE_REFINEMENT_CHANGE.txt` for the complete UI pass.
+
 # Lil God Projector v1.8
 
 - TAP button + T-key tap tempo.
@@ -153,3 +162,9 @@ In pure EUCLID mode, generated hits are now full-opacity and remain editable. A 
 
 ## v1.8.3 UADx fix
 Capitol Chambers auto-loading now explicitly prefers/requires the native UADx build and rejects identifiable legacy UAD/UAD-2 DSP variants. VST3 is preferred over AU when both native formats are present.
+
+
+## v3.3.1
+- Added a local REC control directly in the melodic piano-roll/SEQ header. It arms the same global recording engine and starts transport exactly like recording from other views.
+- Renamed the former Prophet lane/UI to MAXPOLY and changed automatic plug-in discovery to UA PolyMAX (`uaudio_polymax`) / PolyMAX rather than Prophet 5.
+- Preserves the original-recording ghost/transparency + RESET generator workflow from v3.3.

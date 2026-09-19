@@ -1,0 +1,17 @@
+Lil God Projector v3.7.1
+
+Compile fix for the unified drum/MIDI key view.
+
+The v3.7 drum drawing block was accidentally inserted into PianoRoll::noteRect(),
+which has no juce::Graphics parameter. That caused the compiler errors reporting
+use of undeclared identifier 'g'.
+
+v3.7.1 moves all drum-grid drawing into PianoRoll::paint(juce::Graphics& g)
+and restores noteRect() to geometry-only code.
+
+No intended v3.7 behavior was removed:
+- drums use the unified key/timeline view
+- click toggles drum hits
+- Delete/Backspace clears selected drum hits
+- STEP/EUCLID/HYBRID share the same view
+- SONG and mixer keyboard behavior remains

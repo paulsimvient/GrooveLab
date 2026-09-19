@@ -1,0 +1,19 @@
+Lil God Projector v3.2 — Workspace Refinement
+
+UI consolidation/refinement pass:
+- Persistent one-row global track selector: KICK, SNARE, CLAP, CHH, OHH, P1, P2, FX, MOOG, PROPHET, KEYS.
+- Global target persists through SEQ / SONG / BEAT / MIXER.
+- Double-click a global track opens the related instrument UI; selection itself stays single-click.
+- Collapsible on-screen keyboard (KEYS button), persisted in app preferences.
+- UI density presets: UI:C / UI:N / UI:L, persisted in app preferences.
+- F toggles focus mode; Esc restores. Focus hides dock/keyboard/context and expands the active workspace.
+- Small contextual inspector on the right; drum/melodic content changes with selected target.
+- Melodic SEQ shows notes + rhythm together; drum SEQ gives the rhythm editor the full workspace.
+- Compact status strip replaces verbose footer help: target, workspace, rhythm mode, quantize, MIDI, REC, FOCUS.
+- Single plug-in-editor policy: opening one instrument UI closes the other hosted instrument editors.
+- Mixer Compact and Detail modes remember separate window size/position.
+- Mixer defaults to Compact; double-click an FX send/label expands Detail and selects that effect.
+- Double-click a SONG section name edits its part; single-click now only selects it.
+- Tighter transport/header and smaller default application size.
+- Instrument dock floating remains inside the main application component and is never system-wide always-on-top.
+- BEAT retained as the dedicated performance workspace; SEQ remains composition, SONG arrangement.

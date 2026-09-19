@@ -29,9 +29,13 @@ public:
     double bpm = 124.0;
     bool recordQuantize = true;
     int recordQuantizeNote = kDefaultQuantizeNote;
+    bool recordOverwrite = false;
     Meter meter = Meter::fourFour;
     MeterTransform meterTransform = MeterTransform::reflow;
     int selectedTrack = 0;
+    // Unified UI selection: 0..7 drums, 8 MOOG, 9 PROPHET, 10 KEYS.
+    // selectedTrack remains the active drum voice for legacy drum editing.
+    int selectedTarget = 0;
     int selectedStep = 0;
 
     void clearSong();

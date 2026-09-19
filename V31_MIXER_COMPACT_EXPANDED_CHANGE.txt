@@ -1,0 +1,8 @@
+Lil God Projector v3.1
+
+- Added COMPACT / DETAIL toggle inside the floating mixer.
+- Compact mode keeps four channel strips, volume, pan, preset row, and all five per-track FX sends.
+- Compact mode hides the shared FX parameter editor and shrinks the mixer window automatically.
+- DETAIL restores the full shared FX editor.
+- Reduced mixer minimum size and tightened control spacing/fonts further.
+- Mixer remains modeless, persistent, and normal application-level (not system always-on-top).

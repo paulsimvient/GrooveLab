@@ -1,0 +1,9 @@
+Lil God Projector v1.9 — MORPH
+
+- CAP A / CAP B performance snapshots
+- Nondestructive A↔B morph control
+- Smooth interpolation for velocity, probability, sound parameters, mix, EQ, delay, Capitol Chambers, Paradise, drive and ring modulation
+- Euclidean Steps/Pulses/Rotate interpolate across the morph
+- Differing drum hits enter/leave at deterministic per-step thresholds, so intermediate grooves stay stable
+- A and B endpoints restore their captured states exactly
+- Instrument identity, BPM, routing and song structure are not morphed

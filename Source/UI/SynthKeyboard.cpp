@@ -212,7 +212,7 @@ void SynthKeyboard::paint(juce::Graphics& g)
     g.setFont(juce::FontOptions(11.0f, juce::Font::bold));
     juce::String title = "MOOG  ·  CH2  ·  ";
     if (keyboardTarget == 1) title = "KEYS  ·  CH4  ·  ";
-    else if (keyboardTarget == 2) title = "PROPHET  ·  CH3  ·  ";
+    else if (keyboardTarget == 2) title = "MAXPOLY  ·  CH3  ·  ";
     else if (keyboardTarget == 3) title = "DRUMS  ·  CH1  ·  ";
     title = title
         + groove::midiNoteName(lo) + "–" + groove::midiNoteName(hi)

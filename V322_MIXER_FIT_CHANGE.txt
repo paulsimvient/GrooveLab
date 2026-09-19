@@ -1,0 +1,9 @@
+Lil God Projector v3.2.2 — Mixer Fit
+
+- Compact mixer now targets a console-sized ~880 x 238 window.
+- Migrates oversized compact mixer bounds saved by older builds.
+- Compact width is clamped to 760–940 px and height to 220–270 px.
+- Four channel strips are narrower and denser.
+- Smaller title/send fonts, shorter send rows, smaller buttons/readouts.
+- Compact master/FX-return bus narrowed and shortened.
+- Detail mode remains available and retains its independent geometry.

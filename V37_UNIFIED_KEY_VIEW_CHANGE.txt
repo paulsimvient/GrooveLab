@@ -1,0 +1,8 @@
+Lil God Projector v3.7
+
+- One note/key view for both drums and melodic instruments in SEQ.
+- Drum mode uses eight labeled MIDI-key rows and the same timeline above the Euclidean/generator panel.
+- Clicking a drum cell toggles the hit; Delete/Backspace clears the selected hit.
+- SONG keeps the persistent keyboard at the bottom.
+- Floating MIXER now includes its own synchronized playable keyboard at the bottom.
+- Mixer keyboard follows the same persistent instrument/channel and octave state as the main keyboard.

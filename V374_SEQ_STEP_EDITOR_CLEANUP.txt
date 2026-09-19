@@ -1,0 +1,6 @@
+v3.7.4 — SEQ selected-step cleanup
+
+- Removed PROBABILITY and all per-step sound-shaping controls (PITCH through BLEND) from the drum SEQ selected-step panel.
+- The drum selected-step panel now shows only VELOCITY, NOTE, and REPEATS plus PLAY/CLEAR STEP.
+- Reduced selected-step panel height to return more space to the timeline/rhythm editor.
+- Underlying probability/parameter-lock engine data is preserved for compatibility; only the duplicate UI is removed.

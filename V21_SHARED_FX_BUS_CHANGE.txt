@@ -1,0 +1,8 @@
+Lil God Projector v2.1 — Shared FX Bus
+
+- Replaced per-track creative plugin chains with one shared post-fader FX send bus.
+- Each track now has FX ON/OFF + SEND amount.
+- Shared rack: Paradise Guitar Studio, Century Tube Channel Strip, Compressor, Galaxy Tape Echo, Capitol Chambers.
+- Removed Drive/Sat and Ring Mod from UI and processing. Legacy fields remain only for project compatibility.
+- Native/UADx plug-in discovery prefers VST3 and rejects identifiable UAD-2 paths.
+- FX RETURN controls the shared wet return.

@@ -1,0 +1,9 @@
+Lil God Projector v3.4 — Performance Variations
+
+- Adds ANSWER melodic generation mode.
+- ANSWER preserves the recorded phrase and creates complementary notes only in rests.
+- Original performance remains translucent/ghosted in the piano roll.
+- NEW TAKE changes the deterministic variation seed without touching the source.
+- KEEP commits the current ANSWER into the piano roll and returns to STEP.
+- RESET always restores the untouched original recording.
+- Existing STEP/EUCLID/HYBRID/ARP/WALK remain available.

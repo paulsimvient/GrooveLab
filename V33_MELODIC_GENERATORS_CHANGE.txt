@@ -1,0 +1,10 @@
+Lil God Projector v3.3 — Melodic Generators + Source Transparency
+
+- Added ARP and WALK creation modes for MOOG / PROPHET / KEYS.
+- ARP advances through the pitch pool captured from the original recorded MIDI; RATE, OCTAVES and SEED/START controls live in the shared SEQ shape panel.
+- WALK creates a deterministic random walk through the same recorded note pool; RATE, JUMP and SEED are editable.
+- Generator modes are non-destructive. Entering EUCLID/HYBRID/ARP/WALK snapshots the original MIDI recording.
+- Piano roll shows the source recording as transparent ghost notes and the generated result as solid notes.
+- Added RESET in the piano-roll header to restore the original recording and return to STEP mode.
+- Source snapshot and generator settings save with grooves/song sections.
+- Drum STEP/EUCLID/HYBRID behavior is unchanged.

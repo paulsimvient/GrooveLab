@@ -1,0 +1,20 @@
+Lil God Projector v3.5 — Two-Screen Workspace
+
+Primary navigation is now only:
+  SEQ | SONG
+
+SEQ owns creation and performance:
+  EDIT    = existing notes + rhythm / generative editor
+  PERFORM = former BEAT workspace, now a SEQ submode
+
+SONG owns section arrangement. The former BEAT top-level screen is removed.
+Section tiles were removed from PERFORM so section selection/arrangement is not duplicated.
+
+Persistent instrument selection remains global across SEQ EDIT, SEQ PERFORM, SONG, and MIXER.
+
+TAB + click a SONG section copies only the currently selected global target into that section:
+  - melodic target: copies that instrument MIDI lane
+  - drum target: copies that selected drum track
+It does not switch away from the currently active section.
+
+Delete/Backspace in SEQ PERFORM still deletes the selected beat hit.

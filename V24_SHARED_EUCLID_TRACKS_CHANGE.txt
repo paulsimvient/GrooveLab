@@ -1,0 +1,11 @@
+Lil God Projector v2.4 — Shared Euclidean Tracks
+
+The EUC page is now one editor for every sequenced target.
+
+Bottom selector in the SAME EUC window:
+KICK · SNARE · CLAP · CHH · OHH · PERC1 · PERC2 · FX · MOOG · PROPHET · KEYS
+
+Select any target and the existing STEPS / PULSES / ROTATE controls edit that target immediately.
+Drum targets retain their drum step controls. Melodic targets use the same 32-step Euclidean gate grid while pitches remain in the piano roll.
+Command-click mutes either a drum target or melodic instrument lane.
+Selecting MOOG / PROPHET / KEYS in EUC also makes that instrument the active MIDI channel.

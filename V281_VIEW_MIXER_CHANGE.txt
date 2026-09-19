@@ -1,0 +1,8 @@
+Lil God Projector v2.8.1 — View-controlled application mixer
+
+- Replaced the top-bar MIX shortcut with VIEW.
+- VIEW > Mixer toggles the persistent floating mixer window.
+- Mixer remains modeless and keeps the same live mixer/instrument state across GRID, EUC, SONG, and BEAT.
+- Removed system-wide always-on-top behavior.
+- Mixer is now a normal Lil God Projector application window, so it can float beside the main window but other applications can appear above it normally.
+- Mixer window bounds and visibility continue to persist.

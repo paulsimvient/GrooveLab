@@ -8,7 +8,7 @@ namespace groove
 // and must not be used for sequencer hits.
 constexpr int kMidiChDrums = 1;
 constexpr int kMidiChMoog  = 2;
-constexpr int kMidiChPoly  = 3; // G-Force Prophet 5
+constexpr int kMidiChPoly  = 3; // UA PolyMAX / MAXPOLY
 constexpr int kMidiChKeys  = 4; // Electra 88 only
 constexpr int kUjamKitLow  = 36; // C1 BD 1
 constexpr int kUjamKitHigh = 51; // D#2 HH 4

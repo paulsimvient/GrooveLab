@@ -290,8 +290,17 @@ void GrooveEngine::toggleStep(int track, int step)
 
 void GrooveEngine::selectStep(int track, int step)
 {
-    grooveState.selectedTrack = track;
-    grooveState.selectedStep = step;
+    grooveState.selectedTrack = juce::jlimit(0, kTracks - 1, track);
+    grooveState.selectedTarget = grooveState.selectedTrack;
+    grooveState.selectedStep = juce::jlimit(0, kSteps - 1, step);
+}
+
+void GrooveEngine::selectUnifiedTarget(int target)
+{
+    const juce::ScopedLock sl(stateLock);
+    grooveState.selectedTarget = juce::jlimit(0, kUnifiedTracks - 1, target);
+    if (unifiedTrackIsDrum(grooveState.selectedTarget))
+        grooveState.selectedTrack = grooveState.selectedTarget;
 }
 
 void GrooveEngine::setBaseParam(int track, Param p, float value)
@@ -711,8 +720,14 @@ int GrooveEngine::addMidiLaneNote(int lane, int step, int note, float velocity, 
     n.note = juce::jlimit(0, 127, note);
     n.velocity = juce::jlimit(0.0f, 1.0f, velocity);
     n.lengthSteps = juce::jmax(1, lengthSteps);
-    auto& notes = grooveState.midiLanes[(size_t) lane].notes;
+    auto& laneState = grooveState.midiLanes[(size_t) lane];
+    auto& notes = laneState.notes;
     notes.push_back(n);
+    if (laneState.rhythmMode == RhythmMode::step)
+    {
+        laneState.sourceSnapshotValid = false;
+        laneState.sourceNotes.clear();
+    }
     if (! grooveState.song.sections.empty())
     {
         const int i = juce::jlimit(0, (int) grooveState.song.sections.size() - 1, grooveState.song.current);
@@ -728,10 +743,16 @@ bool GrooveEngine::deleteMidiLaneNote(int lane, int noteIndex)
     const juce::ScopedLock sl(stateLock);
     if (lane < 0 || lane >= kMidiLanes)
         return false;
-    auto& notes = grooveState.midiLanes[(size_t) lane].notes;
+    auto& laneState = grooveState.midiLanes[(size_t) lane];
+    auto& notes = laneState.notes;
     if (noteIndex < 0 || noteIndex >= (int) notes.size())
         return false;
     notes.erase(notes.begin() + noteIndex);
+    if (laneState.rhythmMode == RhythmMode::step)
+    {
+        laneState.sourceSnapshotValid = false;
+        laneState.sourceNotes.clear();
+    }
     if (! grooveState.song.sections.empty())
     {
         const int i = juce::jlimit(0, (int) grooveState.song.sections.size() - 1, grooveState.song.current);
@@ -749,10 +770,16 @@ void GrooveEngine::updateMidiLaneNote(int lane, int noteIndex, const MidiLaneNot
     const juce::ScopedLock sl(stateLock);
     if (lane < 0 || lane >= kMidiLanes)
         return;
-    auto& notes = grooveState.midiLanes[(size_t) lane].notes;
+    auto& laneState = grooveState.midiLanes[(size_t) lane];
+    auto& notes = laneState.notes;
     if (noteIndex < 0 || noteIndex >= (int) notes.size())
         return;
     notes[(size_t) noteIndex] = note;
+    if (laneState.rhythmMode == RhythmMode::step)
+    {
+        laneState.sourceSnapshotValid = false;
+        laneState.sourceNotes.clear();
+    }
     if (! grooveState.song.sections.empty())
     {
         const int i = juce::jlimit(0, (int) grooveState.song.sections.size() - 1, grooveState.song.current);
@@ -1137,6 +1164,36 @@ void GrooveEngine::duplicateSongSection(int index)
     saveAutosave();
 }
 
+bool GrooveEngine::copySelectedTargetToSongSection(int index)
+{
+    const juce::ScopedLock sl(stateLock);
+    auto& sections = grooveState.song.sections;
+    if (index < 0 || index >= (int) sections.size())
+        return false;
+
+    // Capture the live editor first so the source is exactly what the user
+    // currently sees/hears in SEQ, then copy only the globally selected target.
+    grooveState.captureLiveToCurrentSection();
+    auto& dst = sections[(size_t) index];
+    const int target = juce::jlimit(0, groove::kUnifiedTracks - 1, grooveState.selectedTarget);
+    if (groove::unifiedTrackIsDrum(target))
+    {
+        const int track = juce::jlimit(0, groove::kTracks - 1, target);
+        dst.shapes[(size_t) track] = TrackShape::fromTrack(grooveState.tracks[(size_t) track]);
+        dst.steps[(size_t) track] = grooveState.tracks[(size_t) track].steps;
+    }
+    else
+    {
+        const int lane = groove::unifiedTrackMidiLane(target);
+        if (lane <= 0 || lane >= groove::kMidiLanes)
+            return false;
+        dst.midiLanes[(size_t) lane] = grooveState.midiLanes[(size_t) lane];
+    }
+
+    saveAutosave();
+    return true;
+}
+
 void GrooveEngine::selectSongSection(int index, bool jumpOnBeat)
 {
     const juce::ScopedLock sl(stateLock);
@@ -1471,13 +1528,17 @@ void GrooveEngine::recordLaneNoteLocked(int lane, int note, float velocity, int 
     const int len = juce::jmax(1, grooveState.recordQuantize
         ? juce::jmax(grid, ((lengthSteps + grid / 2) / grid) * grid)
         : lengthSteps);
-    for (auto& existing : L.notes)
-        if (existing.step == step && existing.note == note)
-        {
-            existing.velocity = juce::jlimit(0.05f, 1.2f, velocity);
-            existing.lengthSteps = juce::jmax(existing.lengthSteps, len);
-            return;
-        }
+    if (grooveState.recordOverwrite)
+        L.notes.erase(std::remove_if(L.notes.begin(), L.notes.end(),
+            [step](const MidiLaneNote& existing) { return existing.step == step; }), L.notes.end());
+    else
+        for (auto& existing : L.notes)
+            if (existing.step == step && existing.note == note)
+            {
+                existing.velocity = juce::jlimit(0.05f, 1.2f, velocity);
+                existing.lengthSteps = juce::jmax(existing.lengthSteps, len);
+                return;
+            }
     L.notes.push_back({ step, juce::jlimit(0, 127, note), juce::jlimit(0.05f, 1.2f, velocity), len });
 }
 
@@ -1604,21 +1665,212 @@ void GrooveEngine::cancelPendingLaneNoteOff(int channel, int note)
 void GrooveEngine::emitLaneStep(int step, int blockSamples)
 {
     const int stepSamples = laneStepSamples();
+
+    auto melodicGateAt = [](const MidiLane& lane, int localStep)
+    {
+        if (localStep < 0 || localStep >= lane.euclidSteps)
+            return false;
+        bool gate = Sequencer::euclideanHit(localStep, lane.euclidSteps, lane.euclidPulses, lane.euclidRotate);
+        if (lane.rhythmMode == RhythmMode::hybrid)
+        {
+            const auto ov = lane.gateOverrides[(size_t) localStep];
+            if (ov == StepOverrideMode::forceOn) gate = true;
+            else if (ov == StepOverrideMode::forceOff) gate = false;
+        }
+        return gate;
+    };
+
     for (int lane = 0; lane < kMidiLanes; ++lane)
     {
         const auto& L = grooveState.midiLanes[(size_t) lane];
+        if (L.muted)
+            continue;
+
         const int ch = juce::jlimit(1, 16, L.channel);
-        for (const auto& n : L.notes)
+
+        // STEP mode stays a conventional piano roll: notes play exactly where written.
+        if (L.rhythmMode == RhythmMode::step || lane == 0)
         {
-            if (n.step != step)
-                continue;
-            const auto vel = (juce::uint8) juce::jlimit(1, 127, (int) std::round(n.velocity * 127.0f));
-            cancelPendingLaneNoteOff(ch, n.note);
-            scheduleLaneMidi(juce::MidiMessage::noteOff(ch, n.note), 0, blockSamples);
-            scheduleLaneMidi(juce::MidiMessage::noteOn(ch, n.note, vel), 0, blockSamples);
-            const int noteLen = juce::jmax(stepSamples / 4, juce::jmax(1, n.lengthSteps) * stepSamples);
-            scheduleLaneMidi(juce::MidiMessage::noteOff(ch, n.note), noteLen, blockSamples);
+            for (const auto& n : L.notes)
+            {
+                if (n.step != step)
+                    continue;
+                const auto vel = (juce::uint8) juce::jlimit(1, 127, (int) std::round(n.velocity * 127.0f));
+                cancelPendingLaneNoteOff(ch, n.note);
+                scheduleLaneMidi(juce::MidiMessage::noteOff(ch, n.note), 0, blockSamples);
+                scheduleLaneMidi(juce::MidiMessage::noteOn(ch, n.note, vel), 0, blockSamples);
+                const int noteLen = juce::jmax(stepSamples / 4, juce::jmax(1, n.lengthSteps) * stepSamples);
+                scheduleLaneMidi(juce::MidiMessage::noteOff(ch, n.note), noteLen, blockSamples);
+            }
         }
+        else if (L.rhythmMode == RhythmMode::euclid || L.rhythmMode == RhythmMode::hybrid)
+        {
+            // EUCLID/HYBRID turns the recorded piano-roll material into a source pool.
+            // The source snapshot stays untouched and is shown as transparent ghost notes.
+            const auto& source = (L.sourceSnapshotValid && ! L.sourceNotes.empty()) ? L.sourceNotes : L.notes;
+            const int cycleSteps = juce::jmax(1, L.euclidSteps);
+            const int local = ((step % cycleSteps) + cycleSteps) % cycleSteps;
+            if (! melodicGateAt(L, local))
+                continue;
+
+            const juce::uint32 h = (juce::uint32) (lane * 2654435761u)
+                                 ^ (juce::uint32) (step * 2246822519u)
+                                 ^ (juce::uint32) (L.euclidRotate * 3266489917u);
+            const float unit = (float) (h & 0xffffu) / 65535.0f;
+            if (unit > L.euclidProbability)
+                continue;
+
+            std::array<int, kSteps> starts {};
+            int startCount = 0;
+            for (const auto& n : source)
+            {
+                const int ns = juce::jlimit(0, kSteps - 1, n.step);
+                bool exists = false;
+                for (int i = 0; i < startCount; ++i)
+                    if (starts[(size_t) i] == ns) { exists = true; break; }
+                if (! exists && startCount < kSteps)
+                    starts[(size_t) startCount++] = ns;
+            }
+            if (startCount == 0)
+                continue;
+            std::sort(starts.begin(), starts.begin() + startCount);
+
+            int pulseOrdinal = -1;
+            for (int s = 0; s <= local; ++s)
+                if (melodicGateAt(L, s)) ++pulseOrdinal;
+            pulseOrdinal = juce::jmax(0, pulseOrdinal);
+            const int sourceStep = starts[(size_t) (pulseOrdinal % startCount)];
+            const int repeats = juce::jlimit(1, 4, L.euclidRepeats);
+            const int repeatSpacing = juce::jmax(1, stepSamples / repeats);
+
+            for (const auto& n : source)
+            {
+                if (n.step != sourceStep)
+                    continue;
+                const int note = juce::jlimit(0, 127, n.note + 12 * L.euclidOctave);
+                const float scaledVel = juce::jlimit(0.01f, 1.2f, n.velocity * L.euclidVelocity);
+                const auto vel = (juce::uint8) juce::jlimit(1, 127, (int) std::round(scaledVel * 127.0f));
+                cancelPendingLaneNoteOff(ch, note);
+                scheduleLaneMidi(juce::MidiMessage::noteOff(ch, note), 0, blockSamples);
+                for (int r = 0; r < repeats; ++r)
+                {
+                    const int onAt = r * repeatSpacing;
+                    const int gateSamples = juce::jmax(stepSamples / 16,
+                        (int) std::round(repeatSpacing * juce::jlimit(0.05f, 1.0f, L.euclidGate)));
+                    scheduleLaneMidi(juce::MidiMessage::noteOn(ch, note, vel), onAt, blockSamples);
+                    scheduleLaneMidi(juce::MidiMessage::noteOff(ch, note), onAt + gateSamples, blockSamples);
+                }
+            }
+        }
+        else if (L.rhythmMode == RhythmMode::answer)
+        {
+            // ANSWER uses the performed phrase as analysis/source material only.
+            // The original recording remains visible as transparent ghost notes,
+            // but it is intentionally silent during generated preview playback.
+            // Proactively kill any source-note voice/pending note that may have been
+            // scheduled before ANSWER was selected, so the ghost layer can never
+            // leak through underneath the generated response.
+            const auto& source = (L.sourceSnapshotValid && ! L.sourceNotes.empty()) ? L.sourceNotes : L.notes;
+            for (const auto& n : source)
+            {
+                cancelPendingLaneNoteOff(ch, n.note);
+                scheduleLaneMidi(juce::MidiMessage::noteOff(ch, n.note), 0, blockSamples);
+            }
+
+            bool occupied = false;
+            for (const auto& n : source) if (n.step == step) { occupied = true; break; }
+            const int spacing = juce::jlimit(1, 16, L.generatorRate);
+            const float amount = juce::jlimit(0.25f, 1.0f, L.generatorDepth / 4.0f);
+            if (! occupied && (step % spacing) == 0 && ! source.empty())
+            {
+                bool recentPhrase = false;
+                for (const auto& n : source)
+                    if (n.step < step && n.step >= juce::jmax(0, step - 8)) { recentPhrase = true; break; }
+                const juce::uint32 h = (juce::uint32)((L.generatorSeed + 1) * 2654435761u) ^ (juce::uint32)((step + 1) * 2246822519u);
+                const float u = (float)(h & 0xffffu) / 65535.0f;
+                if (recentPhrase && u <= amount)
+                {
+                    std::vector<int> pitches;
+                    for (const auto& n : source) if (std::find(pitches.begin(), pitches.end(), n.note) == pitches.end()) pitches.push_back(n.note);
+                    std::sort(pitches.begin(), pitches.end());
+                    if (! pitches.empty())
+                    {
+                        const int idx = (L.generatorSeed + step / spacing) % (int)pitches.size();
+                        const int mirror = (int)pitches.size() - 1 - idx;
+                        int note = pitches[(size_t)juce::jlimit(0, (int)pitches.size()-1, mirror)];
+                        if (((h >> 18) & 3u) == 0u) note = juce::jlimit(0,127,note + 12);
+                        float avg = 0.0f; for (const auto& n : source) avg += n.velocity; avg /= juce::jmax(1,(int)source.size());
+                        const auto vel = (juce::uint8)juce::jlimit(1,127,(int)std::round(juce::jlimit(0.05f,1.0f,avg * 0.88f) * 127.0f));
+                        scheduleLaneMidi(juce::MidiMessage::noteOn(ch,note,vel),0,blockSamples);
+                        scheduleLaneMidi(juce::MidiMessage::noteOff(ch,note),juce::jmax(stepSamples/4,(int)std::round(stepSamples * L.euclidGate)),blockSamples);
+                    }
+                }
+            }
+        }
+        else if (L.rhythmMode == RhythmMode::arp || L.rhythmMode == RhythmMode::walk)
+        {
+            // ARP and WALK are intentionally non-destructive: they read from the
+            // frozen recording but never rewrite it.
+            const auto& source = (L.sourceSnapshotValid && ! L.sourceNotes.empty()) ? L.sourceNotes : L.notes;
+            if (source.empty())
+                continue;
+
+            const int rate = juce::jlimit(1, 16, L.generatorRate);
+            if ((step % rate) != 0)
+                continue;
+            const int ordinal = juce::jmax(0, step / rate);
+
+            std::array<int, 128> pitches {};
+            int pitchCount = 0;
+            float velocitySum = 0.0f;
+            for (const auto& n : source)
+            {
+                bool exists = false;
+                for (int i = 0; i < pitchCount; ++i)
+                    if (pitches[(size_t) i] == n.note) { exists = true; break; }
+                if (! exists && pitchCount < 128)
+                    pitches[(size_t) pitchCount++] = n.note;
+                velocitySum += n.velocity;
+            }
+            if (pitchCount == 0)
+                continue;
+            std::sort(pitches.begin(), pitches.begin() + pitchCount);
+
+            int note = pitches[0];
+            if (L.rhythmMode == RhythmMode::arp)
+            {
+                const int depth = juce::jlimit(1, 4, L.generatorDepth);
+                const int index = ordinal % pitchCount;
+                const int octave = (ordinal / pitchCount) % depth;
+                note = juce::jlimit(0, 127, pitches[(size_t) index] + 12 * octave);
+            }
+            else
+            {
+                // Deterministic random walk: same seed always reproduces the phrase.
+                int index = pitchCount > 0 ? (L.generatorSeed % pitchCount) : 0;
+                const int depth = juce::jlimit(1, 4, L.generatorDepth);
+                for (int i = 0; i < ordinal; ++i)
+                {
+                    const juce::uint32 h = (juce::uint32) ((L.generatorSeed + 1) * 2654435761u)
+                                         ^ (juce::uint32) ((i + 1) * 2246822519u);
+                    int jump = (int) (h % (juce::uint32) (2 * depth + 1)) - depth;
+                    if (jump == 0) jump = ((h >> 8) & 1u) ? 1 : -1;
+                    index = juce::jlimit(0, pitchCount - 1, index + jump);
+                }
+                note = pitches[(size_t) index];
+            }
+
+            const float avgVel = juce::jlimit(0.05f, 1.0f, velocitySum / juce::jmax(1, (int) source.size()));
+            const auto vel = (juce::uint8) juce::jlimit(1, 127, (int) std::round(avgVel * 127.0f));
+            cancelPendingLaneNoteOff(ch, note);
+            scheduleLaneMidi(juce::MidiMessage::noteOff(ch, note), 0, blockSamples);
+            scheduleLaneMidi(juce::MidiMessage::noteOn(ch, note, vel), 0, blockSamples);
+            const int gateSamples = juce::jmax(stepSamples / 8,
+                (int) std::round(stepSamples * rate * juce::jlimit(0.05f, 1.0f, L.euclidGate)));
+            scheduleLaneMidi(juce::MidiMessage::noteOff(ch, note), gateSamples, blockSamples);
+        }
+
+        // Automation remains timeline-based in all rhythm modes.
         for (const auto& c : L.ccs)
             if (c.step == step)
                 scheduleLaneMidi(juce::MidiMessage::controllerEvent(ch, c.number, c.value), 0, blockSamples);
@@ -1635,13 +1887,6 @@ void GrooveEngine::emitLaneStep(int step, int blockSamples)
                                                                     juce::jlimit(0, 127, e.data2)), 0, blockSamples);
             else if (e.type == 4)
                 scheduleLaneMidi(juce::MidiMessage::programChange(ch, juce::jlimit(0, 127, e.data1)), 0, blockSamples);
-        }
-        for (const auto& p : L.patches)
-        {
-            if (p.step != step)
-                continue;
-            const juce::ScopedLock sl(patchLock);
-            pendingPatches.push_back({ lane, p.name, p.kitIndex });
         }
     }
 }
@@ -1851,6 +2096,203 @@ void GrooveEngine::setRecordQuantizeNote(int note)
     grooveState.recordQuantizeNote = juce::jlimit(0, kQuantizeNoteCount - 1, note);
 }
 
+void GrooveEngine::setRecordOverwrite(bool shouldOverwrite)
+{
+    const juce::ScopedLock sl(stateLock);
+    grooveState.recordOverwrite = shouldOverwrite;
+}
+
+void GrooveEngine::setMidiLaneMuted(int lane, bool muted)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (lane < 0 || lane >= kMidiLanes) return;
+    grooveState.midiLanes[(size_t) lane].muted = muted;
+    if (! grooveState.song.sections.empty())
+        grooveState.song.sections[(size_t) grooveState.song.current].midiLanes[(size_t) lane].muted = muted;
+}
+
+void GrooveEngine::setMidiLaneEuclid(int lane, bool enabled, int steps, int pulses, int rotate)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (lane < 0 || lane >= kMidiLanes) return;
+    auto apply = [=](MidiLane& L)
+    {
+        const auto previousMode = L.rhythmMode;
+        if (enabled && ! L.sourceSnapshotValid)
+        {
+            L.sourceNotes = L.notes;
+            L.sourceSnapshotValid = true;
+        }
+        L.rhythmMode = enabled ? (previousMode == RhythmMode::hybrid ? RhythmMode::hybrid : RhythmMode::euclid)
+                               : RhythmMode::step;
+        L.euclidEnabled = enabled;
+        L.euclidSteps = juce::jlimit(1, kSteps, steps);
+        L.euclidPulses = juce::jlimit(0, L.euclidSteps, pulses);
+        L.euclidRotate = rotate;
+    };
+    apply(grooveState.midiLanes[(size_t) lane]);
+    if (! grooveState.song.sections.empty())
+        apply(grooveState.song.sections[(size_t) grooveState.song.current].midiLanes[(size_t) lane]);
+}
+
+void GrooveEngine::setMidiLaneRhythmMode(int lane, RhythmMode mode)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (lane <= 0 || lane >= kMidiLanes) return;
+    mode = (RhythmMode) juce::jlimit(0, 5, (int) mode);
+    auto apply = [=](MidiLane& L)
+    {
+        // The first time a non-destructive generator is engaged, freeze the
+        // played/recorded material so the piano roll can show it as ghost notes
+        // and RESET can always return to it.
+        if (mode != RhythmMode::step && ! L.sourceSnapshotValid)
+        {
+            L.sourceNotes = L.notes;
+            L.sourceSnapshotValid = true;
+        }
+        L.rhythmMode = mode;
+        L.euclidEnabled = mode == RhythmMode::euclid || mode == RhythmMode::hybrid;
+    };
+    apply(grooveState.midiLanes[(size_t) lane]);
+    if (! grooveState.song.sections.empty())
+        apply(grooveState.song.sections[(size_t) grooveState.song.current].midiLanes[(size_t) lane]);
+
+    if (mode == RhythmMode::answer)
+    {
+        const int ch = juce::jlimit(1, 16, grooveState.midiLanes[(size_t) lane].channel);
+        pendingLaneMidi.erase(std::remove_if(pendingLaneMidi.begin(), pendingLaneMidi.end(),
+            [ch](const PendingMidi& p) { return p.message.getChannel() == ch; }), pendingLaneMidi.end());
+        for (int note = 0; note < 128; ++note)
+            pendingLaneMidi.push_back({ 0, juce::MidiMessage::noteOff(ch, note) });
+        pendingLaneMidi.push_back({ 0, juce::MidiMessage::allNotesOff(ch) });
+    }
+
+    syncCurrentSongSection();
+    saveAutosave();
+}
+
+void GrooveEngine::setMidiLaneGeneratorControls(int lane, int rate, int depth, int seed)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (lane <= 0 || lane >= kMidiLanes) return;
+    auto apply = [=](MidiLane& L)
+    {
+        L.generatorRate = juce::jlimit(1, 16, rate);
+        L.generatorDepth = juce::jlimit(1, 4, depth);
+        L.generatorSeed = juce::jlimit(0, 31, seed);
+    };
+    apply(grooveState.midiLanes[(size_t) lane]);
+    if (! grooveState.song.sections.empty())
+        apply(grooveState.song.sections[(size_t) grooveState.song.current].midiLanes[(size_t) lane]);
+    syncCurrentSongSection();
+    saveAutosave();
+}
+
+void GrooveEngine::resetMidiLaneToSource(int lane)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (lane <= 0 || lane >= kMidiLanes) return;
+    auto apply = [](MidiLane& L)
+    {
+        if (L.sourceSnapshotValid)
+            L.notes = L.sourceNotes;
+        L.rhythmMode = RhythmMode::step;
+        L.euclidEnabled = false;
+        L.gateOverrides.fill(StepOverrideMode::inherit);
+        L.sourceSnapshotValid = false;
+        L.sourceNotes.clear();
+        L.generatorRate = 1;
+        L.generatorDepth = 1;
+        L.generatorSeed = 0;
+    };
+    apply(grooveState.midiLanes[(size_t) lane]);
+    if (! grooveState.song.sections.empty())
+        apply(grooveState.song.sections[(size_t) grooveState.song.current].midiLanes[(size_t) lane]);
+    syncCurrentSongSection();
+    saveAutosave();
+}
+
+void GrooveEngine::newMidiLaneGeneratedTake(int lane)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (lane <= 0 || lane >= kMidiLanes) return;
+    auto apply = [](MidiLane& L) { L.generatorSeed = (L.generatorSeed + 1) % 32; };
+    apply(grooveState.midiLanes[(size_t) lane]);
+    if (! grooveState.song.sections.empty()) apply(grooveState.song.sections[(size_t) grooveState.song.current].midiLanes[(size_t) lane]);
+    syncCurrentSongSection(); saveAutosave();
+}
+
+void GrooveEngine::keepMidiLaneGeneratedTake(int lane)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (lane <= 0 || lane >= kMidiLanes) return;
+    auto apply = [](MidiLane& L)
+    {
+        if (L.rhythmMode != RhythmMode::answer) return;
+        const auto source = (L.sourceSnapshotValid && ! L.sourceNotes.empty()) ? L.sourceNotes : L.notes;
+        std::vector<MidiLaneNote> result = source;
+        const int spacing = juce::jlimit(1,16,L.generatorRate);
+        const float amount = juce::jlimit(0.25f,1.0f,L.generatorDepth/4.0f);
+        std::vector<int> pitches; float avg=0.0f;
+        for (const auto& n:source) { if (std::find(pitches.begin(),pitches.end(),n.note)==pitches.end()) pitches.push_back(n.note); avg += n.velocity; }
+        std::sort(pitches.begin(),pitches.end()); avg /= juce::jmax(1,(int)source.size());
+        for (int step=0; step<kSteps && !pitches.empty(); ++step)
+        {
+            bool occupied=false,recent=false; for(const auto& n:source){ if(n.step==step) occupied=true; if(n.step<step&&n.step>=juce::jmax(0,step-8)) recent=true; }
+            if(occupied || !recent || (step%spacing)!=0) continue;
+            const juce::uint32 h=(juce::uint32)((L.generatorSeed+1)*2654435761u)^(juce::uint32)((step+1)*2246822519u);
+            if(((float)(h&0xffffu)/65535.0f)>amount) continue;
+            const int idx=(L.generatorSeed+step/spacing)%(int)pitches.size();
+            int note=pitches[(size_t)((int)pitches.size()-1-idx)]; if(((h>>18)&3u)==0u) note=juce::jlimit(0,127,note+12);
+            MidiLaneNote n; n.step=step; n.note=note; n.velocity=juce::jlimit(0.05f,1.0f,avg*0.88f); n.lengthSteps=juce::jmax(1,spacing); result.push_back(n);
+        }
+        std::sort(result.begin(),result.end(),[](const MidiLaneNote&a,const MidiLaneNote&b){ return a.step==b.step?a.note<b.note:a.step<b.step; });
+        L.notes=std::move(result); L.rhythmMode=RhythmMode::step; L.euclidEnabled=false; L.sourceSnapshotValid=false; L.sourceNotes.clear();
+    };
+    apply(grooveState.midiLanes[(size_t)lane]);
+    if(!grooveState.song.sections.empty()) apply(grooveState.song.sections[(size_t)grooveState.song.current].midiLanes[(size_t)lane]);
+    syncCurrentSongSection(); saveAutosave();
+}
+
+void GrooveEngine::setMidiLaneEuclidPerformance(int lane, float velocity, float probability, int repeats, int octave, float gate)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (lane <= 0 || lane >= kMidiLanes) return;
+    auto apply = [=](MidiLane& L)
+    {
+        L.euclidVelocity = juce::jlimit(0.0f, 1.2f, velocity);
+        L.euclidProbability = juce::jlimit(0.0f, 1.0f, probability);
+        L.euclidRepeats = juce::jlimit(1, 4, repeats);
+        L.euclidOctave = juce::jlimit(-3, 3, octave);
+        L.euclidGate = juce::jlimit(0.05f, 1.0f, gate);
+    };
+    apply(grooveState.midiLanes[(size_t) lane]);
+    if (! grooveState.song.sections.empty())
+        apply(grooveState.song.sections[(size_t) grooveState.song.current].midiLanes[(size_t) lane]);
+}
+
+void GrooveEngine::toggleMidiLaneGateOverride(int lane, int step)
+{
+    const juce::ScopedLock sl(stateLock);
+    if (lane <= 0 || lane >= kMidiLanes || step < 0 || step >= kSteps) return;
+    auto toggle = [=](MidiLane& L)
+    {
+        if (L.rhythmMode == RhythmMode::arp || L.rhythmMode == RhythmMode::walk || L.rhythmMode == RhythmMode::step)
+            return;
+        if (L.rhythmMode == RhythmMode::euclid)
+            L.rhythmMode = RhythmMode::hybrid;
+        L.euclidEnabled = L.rhythmMode == RhythmMode::euclid || L.rhythmMode == RhythmMode::hybrid;
+        const bool generated = Sequencer::euclideanHit(step, L.euclidSteps, L.euclidPulses, L.euclidRotate);
+        auto& ov = L.gateOverrides[(size_t) step];
+        const bool resolved = ov == StepOverrideMode::forceOn ? true
+                            : ov == StepOverrideMode::forceOff ? false : generated;
+        ov = resolved ? StepOverrideMode::forceOff : StepOverrideMode::forceOn;
+    };
+    toggle(grooveState.midiLanes[(size_t) lane]);
+    if (! grooveState.song.sections.empty())
+        toggle(grooveState.song.sections[(size_t) grooveState.song.current].midiLanes[(size_t) lane]);
+}
+
 int GrooveEngine::keepCurrentTakeLocked()
 {
     if (grooveState.song.sections.empty())
@@ -1881,6 +2323,15 @@ void GrooveEngine::setRecordingLocked(bool shouldRecord)
     {
         if (! grooveState.song.sections.empty())
         {
+            // SONG recording is an overdub into the current section. Freeze the
+            // section while recording so starting REC cannot advance into another
+            // section and replace the live drum pattern with that section's data.
+            grooveState.captureLiveToCurrentSection();
+            restoreSongFollowAfterRecord = grooveState.song.follow;
+            grooveState.song.follow = false;
+            queuedSection.store(-1);
+            pendingBeatJump.store(-1);
+
             auto& section = grooveState.song.sections[(size_t) grooveState.song.current];
             if (section.takes.empty())
                 keepCurrentTakeLocked();
@@ -1897,6 +2348,9 @@ void GrooveEngine::setRecordingLocked(bool shouldRecord)
         closeOpenLaneNotesLocked();
         quantizeLiveTakeLocked();
         grooveState.captureLiveToCurrentSection();
+        if (! grooveState.song.sections.empty())
+            grooveState.song.follow = restoreSongFollowAfterRecord;
+        restoreSongFollowAfterRecord = false;
         journal.append("record", "commit");
     }
 }
@@ -2295,6 +2749,7 @@ void GrooveEngine::newProject()
         const auto keepTransform = grooveState.meterTransform;
         const bool keepQuantize = grooveState.recordQuantize;
         const int keepQuantizeNote = grooveState.recordQuantizeNote;
+        const bool keepOverwrite = grooveState.recordOverwrite;
         grooveState = GrooveState();
         grooveState.lastPluginPath = keepPlugin;
         grooveState.soundMode = keepMode;
@@ -2313,6 +2768,7 @@ void GrooveEngine::newProject()
         grooveState.meterTransform = keepTransform;
         grooveState.recordQuantize = keepQuantize;
         grooveState.recordQuantizeNote = keepQuantizeNote;
+        grooveState.recordOverwrite = keepOverwrite;
         ancestryGraph = {};
         sequencer.reset();
         songSamplesInSection = 0.0;

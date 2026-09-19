@@ -1,0 +1,5 @@
+Lil God Projector v2.7.1 compile fix
+
+Fixes InstrumentDock compile errors for groove::kMidiChDrums, kMidiChMoog, kMidiChPoly, and kMidiChKeys by explicitly including Source/Audio/DrumMidi.h in InstrumentDock.h.
+
+No sequencing or UI behavior was changed by this patch.

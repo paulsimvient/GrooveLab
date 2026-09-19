@@ -10,6 +10,7 @@ public:
     void setLane(int laneIndex);
     int getLane() const noexcept { return lane; }
     void refresh();
+    void fitToNotes() { fitNotes(); }
 
     void paint(juce::Graphics&) override;
     void resized() override;
@@ -20,7 +21,7 @@ public:
 
 private:
     groove::GrooveEngine& engine;
-    int lane = 1; // melodic lanes: 1=CH2, 2=CH3, 3=CH4
+    int lane = 1; // 0=drum MIDI-key view, 1..3=melodic lanes
     int selectedNote = -1;
     int lowNote = 36;   // C2
     int highNote = 84;  // C6
@@ -34,6 +35,12 @@ private:
     juce::ComboBox snapBox;
     juce::TextButton octaveDown { "-" }, octaveUp { "+" };
     juce::TextButton deleteButton { "DELETE" };
+    juce::TextButton resetButton { "RESET" };
+    juce::TextButton newTakeButton { "NEW TAKE" };
+    juce::TextButton keepButton { "KEEP" };
+    juce::TextButton fitButton { "FIT NOTES" };
+    juce::TextButton muteButton { "MUTE" };
+    juce::TextButton recordButton { "REC" };
     juce::Label title;
 
     juce::Rectangle<int> headerArea, pianoArea, gridArea, velocityArea, inspectorArea;
@@ -48,7 +55,11 @@ private:
     int snap(int step) const;
     void addNoteAt(juce::Point<int> p);
     void deleteSelected();
+    void fitNotes();
     void selectNote(int index);
+    bool isDrumMode() const noexcept { return lane == 0; }
+    int drumTrackFromY(int y) const;
+    int drumStepFromX(int x) const;
     juce::String laneTitle() const;
     static bool isBlackKey(int note);
 

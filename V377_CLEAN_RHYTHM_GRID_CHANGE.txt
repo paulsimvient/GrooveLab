@@ -1,0 +1,7 @@
+Lil God Projector v3.7.7 — Clean Rhythm Grid
+
+- Removed red diagonal force-off marks from rhythm cells.
+- Removed per-cell MIDI note labels such as SN1.
+- Removed per-cell parameter-lock dots and ratchet text overlays.
+- All underlying step data and editing behavior are preserved.
+- Rhythm grid now shows only step number, hit/generator fill, bar/beat boundary, selection and play position.

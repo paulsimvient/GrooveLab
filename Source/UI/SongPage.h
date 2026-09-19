@@ -26,6 +26,7 @@ public:
     std::function<void()> onSongChanged;
     std::function<void(int channel)> onChannelClicked;
     std::function<void(int channel)> onInstrumentUiClicked;
+    std::function<void(const juce::String&)> onStatusMessage;
 
 private:
     struct TrackRow
@@ -73,6 +74,7 @@ private:
     juce::TextButton recButton { "REC" };
     juce::TextButton quantizeButton { "QUANTIZE" };
     juce::ComboBox quantizeBox;
+    juce::TextButton overwriteButton { "OVERWRITE" };
     static constexpr int kLaneLabelW = 118;
     struct LaneHit : public juce::Component
     {

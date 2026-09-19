@@ -1,0 +1,10 @@
+Lil God Projector v2.8 — Persistent Floating Mixer
+
+- Moved the complete MIX section out of GRID into a separate modeless top-level window.
+- Mixer stays alive while navigating GRID / EUC / SONG / BEAT and while instrument plug-in editors are opened.
+- Mixer is resizable, movable, and always-on-top so it remains available across app windows.
+- Mixer window position/size is stored in Lil God Projector settings.
+- Added a persistent MIX button in the main header to bring the mixer back after closing it.
+- Removed page-driven mixer show/hide logic; the same MixStrip instance and state are used everywhere.
+- Main sequencing area now uses the space previously reserved for the embedded mixer.
+- No changes to mixer routing, shared UADx FX sends, instrument choices, or sequencing data.

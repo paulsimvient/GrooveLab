@@ -1,0 +1,9 @@
+Lil God Projector v3.6 — Single SEQ Record Workspace
+
+- Removed the visible EDIT / PERFORM split. Primary workspaces are now only SEQ and SONG.
+- Former BEAT/PERFORM view is no longer exposed; drum recording happens directly in SEQ.
+- Global REC records the currently selected target. Drum MIDI is written directly into drum steps; melodic MIDI is written into the selected lane.
+- Fixed melodic mode sync: one MidiLane.rhythmMode now drives Torso generator controls, piano-roll title/ghost rendering, playback, context inspector and footer.
+- Piano roll refreshes immediately when generator mode changes and while visible, preventing stale STEP labels while ANSWER is active.
+- Canonicalized lane display name to MAXPOLY, including projects saved with the older POLY label.
+- Delete/Backspace in SEQ edits the current sequencer content directly rather than routing to the retired performance screen.

@@ -1,0 +1,8 @@
+Lil God Projector v3.7.2
+
+SONG REC preserve fix
+- REC in SONG now overdubs the current section without changing its drum pattern.
+- Current live section is captured before record starts.
+- Song follow and queued/jump section changes are suspended while recording.
+- Previous Song Follow state is restored when recording stops.
+- Existing drum tracks remain intact when recording MOOG / MAXPOLY / KEYS.

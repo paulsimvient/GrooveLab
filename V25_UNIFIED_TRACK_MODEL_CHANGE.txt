@@ -1,0 +1,9 @@
+Lil God Projector v2.5 — unified track model
+
+- One persistent selectedTarget across GRID / EUC / NOTES.
+- Targets: KICK, SNARE, CLAP, CHH, OHH, PERC1, PERC2, FX, MOOG, PROPHET, KEYS.
+- EUC uses the same Steps / Pulses / Rotate workspace for every target.
+- Piano Roll no longer duplicates Euclidean controls; use EUC for rhythm, NOTES for pitch/duration/velocity.
+- Drum STEP / EUCLID / HYBRID behavior retained.
+- Melodic Euclidean cycles retain independent steps/pulses/rotate per instrument.
+- Track selection persists when moving between pages.

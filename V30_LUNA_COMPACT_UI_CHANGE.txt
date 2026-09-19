@@ -1,0 +1,9 @@
+Lil God Projector v3.0 — LUNA compact UI
+
+- Reduced default main window to 1440x900.
+- Reduced header, footer, keyboard and persistent instrument dock heights.
+- Added compact global button/combo/label typography.
+- Mixer default is ~1080x380 and can resize down to 820x300.
+- Mixer is positioned relative to the main app on first open, not system-wide always-on-top.
+- Tightened mixer channel strips, sends, labels, knobs and preset rows.
+- Preserved SEQ / SONG / BEAT workflow and all existing audio/state behavior.

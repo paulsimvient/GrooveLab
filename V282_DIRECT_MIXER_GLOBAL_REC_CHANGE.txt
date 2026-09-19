@@ -1,0 +1,8 @@
+Lil God Projector v2.8.2
+
+- VIEW is now a direct show/hide toggle for the floating mixer; no popup menu/dialog.
+- Floating mixer is user-opened and remains modeless, application-level, and shared across GRID/EUC/SONG/BEAT.
+- Added global REC button to the top transport bar so MIDI can be recorded while working in EUC/notes mode as well as SONG.
+- R toggles recording from any page.
+- REC follows the currently persistent selected instrument/channel.
+- Mixer continues to expose per-track sends to Paradise, Century, Compressor, Galaxy and Capitol plus FX return/master.

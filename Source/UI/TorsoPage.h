@@ -16,6 +16,9 @@ public:
     void resized() override;
     void mouseDown(const juce::MouseEvent&) override;
     void refreshFromEngine();
+    void setMidiLane(int laneIndex); // -1 = drum Euclid, 1..3 = melodic instrument lane
+    int getMidiLane() const noexcept { return midiLane; }
+    void setCompactMelodicMode(bool compact);
     bool isInterestedInFileDrag(const juce::StringArray&) override;
     void fileDragEnter(const juce::StringArray&, int, int) override;
     void fileDragExit(const juce::StringArray&) override;
@@ -23,6 +26,8 @@ public:
 
     std::function<void()> onPatternChanged;
     std::function<void(juce::String)> onStatusMessage;
+    // Called when MOOG / MAXPOLY / KEYS is selected directly in the shared EUC window.
+    std::function<void(int)> onMidiChannelSelected;
 
 private:
     void timerCallback() override;
@@ -45,6 +50,12 @@ private:
     juce::ComboBox kitNote;
     juce::Slider probability;
     juce::Slider repeats;
+    // Contextual melodic controls shown in the same lower panel when MOOG / MAXPOLY / KEYS is selected.
+    juce::Slider melodicVelocity;
+    juce::Slider melodicProbability;
+    juce::Slider melodicRepeats;
+    juce::Slider melodicOctave;
+    juce::Slider melodicGate;
     std::array<juce::Slider, groove::paramCount> soundSliders;
     juce::TextButton playStep { "PLAY" };
     juce::TextButton clearStep { "CLEAR STEP" };
@@ -52,7 +63,10 @@ private:
 
     juce::Rectangle<int> shapePanel, pulsePanel, stepPanel, trackPanel;
     bool refreshing = false;
+    int midiLane = -1;
+    bool editingMidiLane() const noexcept { return midiLane > 0 && midiLane < groove::kMidiLanes; }
     bool midiDragOver = false;
+    bool compactMelodicMode = false;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TorsoPage)
 };

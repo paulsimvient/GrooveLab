@@ -1,0 +1,8 @@
+Lil God Projector / GrooveLab v2.0
+
+- Record quantize defaults to 1/16.
+- Added OVERWRITE recording mode: notes recorded onto an occupied quantized step replace notes already starting on that step.
+- Added per-instrument MIDI-lane MUTE.
+- Added per-instrument Euclidean gating in Piano Roll: EUCLID, Steps, Pulses, Rotate.
+- MIDI-lane mute and Euclidean settings are stored in project/song/take data.
+- Improved Mini-Moog discovery for UADx naming and auto-load from the in-app keyboard.

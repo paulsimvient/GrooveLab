@@ -1,0 +1,7 @@
+Lil God Projector v3.7.5
+
+SEQ drum SHAPE cleanup:
+- generator controls now stay entirely inside SHAPE
+- STEPS / PULSES / ROTATE / DIVISION are one compact horizontal row
+- removed old 2x2 placement that overlapped selected-step controls
+- selected-step panel remains VELOCITY / NOTE / REPEATS only

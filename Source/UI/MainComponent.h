@@ -15,9 +15,12 @@
 #include "PatchBrowser.h"
 #include "PianoRoll.h"
 #include "InstrumentBrowser.h"
+#include "InstrumentDock.h"
 #if GROOVELAB_LABS_ENSEMBLE
 #include "../Labs/Ensemble/EnsembleView.h"
 #endif
+
+class MixerWindow;
 
 class MainComponent : public juce::AudioAppComponent,
                       public juce::MenuBarModel,
@@ -62,7 +65,8 @@ private:
     static bool isVirtualMidiName(const juce::String&);
     static bool looksLikeKeyboardMidi(const juce::String&);
     void toggleTransport();
-    void setPage(int page); // 0 GRID, 1 EUCLIDEAN, 2 SONG, 3 ENSEMBLE
+    void setPage(int page); // 1 SEQ, 2 SONG
+    void setSeqMode(int mode); // legacy: SEQ is now the only create/record workspace
     void setLabPageVisible(bool on);
     juce::StringArray getMenuBarNames() override;
     juce::PopupMenu getMenuForIndex(int topLevelIndex, const juce::String& menuName) override;
@@ -94,6 +98,8 @@ private:
     void loadInstrumentForChannel(int channel, const juce::File&);
     void tryLoadCapitolChambers();
     void tryLoadParadiseGuitarStudio();
+    void tryLoadCenturyTube();
+    void tryLoadGalaxyTapeEcho();
     void saveInstrumentDefaults();
     void loadInstrumentDefaultsIntoState();
     void routeExternalMidiToSelected(const juce::MidiBuffer& live,
@@ -121,9 +127,12 @@ private:
     void showLoadMenu();
     void showFileMenu();
     void showLabMenu();
+    void showViewMenu();
     void tapTempo();
     static juce::File findCapitolChambersFile();
     static juce::File findParadiseGuitarStudioFile();
+    static juce::File findCenturyTubeFile();
+    static juce::File findGalaxyTapeEchoFile();
     static juce::PropertiesFile::Options instrumentPreferenceOptions();
     void loadGrooveFromFile(const juce::File&);
     void newGroove();
@@ -138,16 +147,30 @@ private:
     void storeCurrentKeysPatch();
     void storeCurrentPolyPatch();
     void pushMixToDsp();
+    void showMixerWindow(bool makeVisible = true);
+    void saveMixerWindowBounds();
+    void saveMixerWindowBoundsForMode(bool compact);
+    void restoreMixerWindowBoundsForMode(bool compact);
+    void setKeyboardVisible(bool visible);
+    void cycleUiDensity();
+    void applyUiDensity();
+    void setFocusMode(bool on);
+    void refreshContextInspector();
+    juce::String selectedTargetName() const;
+    int selectedTargetChannel() const;
 
     groove::GrooveEngine engine;
     groove::ExternalPluginHost pluginHost;
     groove::ExternalPluginHost synthHost;
     groove::ExternalPluginHost keysHost;
     groove::ExternalPluginHost polymaxHost;
-    std::array<groove::ExternalPluginHost, 4> capitolReverbHosts;
-    std::array<groove::ExternalPluginHost, 4> paradiseGuitarHosts;
+    groove::ExternalPluginHost capitolReverbHost;
+    groove::ExternalPluginHost paradiseGuitarHost;
+    groove::ExternalPluginHost centuryTubeHost;
+    groove::ExternalPluginHost galaxyTapeHost;
+    juce::dsp::Compressor<float> fxBusCompressor;
     groove::MixBus mixBus;
-    juce::AudioBuffer<float> drumStem, synthStem, keysStem, polyStem;
+    juce::AudioBuffer<float> drumStem, synthStem, keysStem, polyStem, fxSendStem, fxReturnStem;
     std::unique_ptr<juce::MidiOutput> midiOutput;
     std::unique_ptr<juce::MidiInput> midiInput;
     std::unique_ptr<juce::FileChooser> fileChooser;
@@ -163,8 +186,11 @@ private:
     groove::ensemble::EnsembleView ensembleView { engine };
 #endif
     SynthKeyboard synthKeyboard;
+    SynthKeyboard mixerKeyboard;
     MixStrip mixStrip;
+    std::unique_ptr<MixerWindow> mixerWindow;
     PianoRoll pianoRoll { engine };
+    InstrumentDock instrumentDock;
     std::unique_ptr<EvolutionWindow> evolutionWindow;
     std::unique_ptr<PatchBrowserWindow> prophetBrowser;
     std::unique_ptr<InstrumentBrowserWindow> instrumentBrowser;
@@ -173,6 +199,7 @@ private:
     juce::MidiBuffer keysMidiScratch, polyMidiScratch, laneMidiScratch, hardwareMidiScratch;
 
     juce::TextButton playButton { "PLAY" };
+    juce::TextButton recordButton { "REC" };
     juce::TextButton resetButton { "RST" };
     juce::TextButton captureButton { "CAPTURE" };
     juce::TextButton backButton { "BACK" };
@@ -180,10 +207,11 @@ private:
     juce::TextButton performButton { "PERF" };
     juce::TextButton commitPerformButton { "KEEP" };
     juce::TextButton pageGridButton { "GRID" };
-    juce::TextButton pageT1Button { "EUC" };
+    juce::TextButton pageT1Button { "SEQ" };
     juce::TextButton pageSongButton { "SONG" };
 #if GROOVELAB_LABS_ENSEMBLE
-    juce::TextButton pageEnsembleButton { "BEAT" };
+    juce::TextButton seqEditButton { "EDIT" };
+    juce::TextButton seqPerformButton { "PERFORM" };
 #endif
     juce::TextButton fileMenuButton { "FILE" };
     juce::TextButton labMenuButton { "LAB" };
@@ -192,6 +220,9 @@ private:
     juce::TextButton loadButton { "LOAD" };
     juce::TextButton evolveButton { "EVOLVE" };
     juce::TextButton tapTempoButton { "TAP" };
+    juce::TextButton mixWindowButton { "MIXER" };
+    juce::TextButton keyboardButton { "KEYS" };
+    juce::TextButton densityButton { "UI:C" };
     std::array<double, 5> tapTimesMs {};
     int tapCount = 0;
     int midiOutIndex = -1;
@@ -206,6 +237,9 @@ private:
     juce::ComboBox meterTransformBox;
     juce::Label meterLabel;
     juce::TextEditor projectName;
+    juce::Label contextTitle, contextDetail, contextHint;
+    juce::TextButton contextPrimary { "MUTE" };
+    juce::TextButton contextSecondary { "PLUGIN" };
 
     std::array<juce::Slider, groove::paramCount> soundSliders;
     std::array<juce::Label, groove::paramCount> soundLabels;
@@ -236,15 +270,23 @@ private:
 
     juce::Label selectedLabel, evolutionStatus, footer;
     bool refreshing = false;
-    int currentPage = 0; // 0 GRID, 1 EUCLIDEAN, 2 SONG, 3 ENSEMBLE
+    int currentPage = 1; // 1 SEQ, 2 SONG
+    int seqMode = 0;      // legacy compatibility; always 0 in v3.6
     bool midiDragOver = false;
+    bool keyboardVisible = true;
+    bool focusMode = false;
+    int uiDensity = 0; // 0 compact, 1 normal, 2 large
     juce::MidiMessageCollector midiCollector;
 
     juce::Rectangle<int> sequencerPanel, inspectorPanel, soundPanel;
     static constexpr int gridLabelWidth = 170;
     static constexpr int gridTopPad = 52;
     static constexpr int gridBottomPad = 42;
-    static constexpr int synthKeyboardH = 96;
+    int synthKeyboardHeight() const noexcept { return uiDensity == 0 ? 62 : (uiDensity == 1 ? 78 : 94); }
+    int instrumentDockHeight() const noexcept { return uiDensity == 0 ? 32 : (uiDensity == 1 ? 38 : 44); }
+    int headerHeight() const noexcept { return uiDensity == 0 ? 38 : (uiDensity == 1 ? 44 : 50); }
+    int footerHeight() const noexcept { return uiDensity == 0 ? 20 : (uiDensity == 1 ? 24 : 28); }
+    juce::Rectangle<int> instrumentDockedBounds;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

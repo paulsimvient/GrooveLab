@@ -1,0 +1,8 @@
+Lil God Projector v3.4.1
+
+- ANSWER preview now plays ONLY generated answer notes.
+- The original recorded phrase remains visible as translucent ghost/source notes but is silent while ANSWER is active.
+- RESET restores the untouched original recording.
+- KEEP commits the generated answer into the piano roll.
+- Factory mix defaults now enable Compressor send at 0.20 and Capitol Chambers send at 0.20 on all four mixer channels (DRUMS, MOOG, MAXPOLY, KEYS).
+- Explicitly saved project mixer values still load from the project.

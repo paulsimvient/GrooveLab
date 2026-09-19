@@ -29,7 +29,21 @@ enum class Param : int
 
 enum class StepRole : int { normal = 0, anchor, ghost, fill };
 enum class EvolutionPolicy : int { protect = 0, anchorsOnly, free };
-enum class RhythmMode : int { step = 0, euclid, hybrid };
+enum class RhythmMode : int { step = 0, euclid, hybrid, arp, walk, answer };
+
+inline const char* rhythmModeName(RhythmMode mode)
+{
+    switch (mode)
+    {
+        case RhythmMode::step: return "STEP";
+        case RhythmMode::euclid: return "EUCLID";
+        case RhythmMode::hybrid: return "HYBRID";
+        case RhythmMode::arp: return "ARP";
+        case RhythmMode::walk: return "WALK";
+        case RhythmMode::answer: return "ANSWER";
+        default: return "STEP";
+    }
+}
 
 // Manual edits live on top of the algorithmic generator.
 // inherit = use Euclidean result, forceOn = always trigger, forceOff = suppress.
@@ -302,6 +316,31 @@ struct MidiLane
 {
     int channel = 1;
     juce::String name;
+    bool muted = false;
+    // Melodic rhythm layer: STEP = notes play as written, EUCLID = pure gate,
+    // HYBRID = Euclidean gate plus per-step force on/off overrides.
+    RhythmMode rhythmMode = RhythmMode::step;
+    bool euclidEnabled = false; // legacy compatibility mirror of rhythmMode != STEP
+    int euclidSteps = 16;
+    int euclidPulses = 4;
+    int euclidRotate = 0;
+    // Performance controls used when EUCLID/HYBRID advances through the lane's note material.
+    float euclidVelocity = 1.0f;
+    float euclidProbability = 1.0f;
+    int euclidRepeats = 1;
+    int euclidOctave = 0;
+    float euclidGate = 0.85f;
+    std::array<StepOverrideMode, kSteps> gateOverrides {};
+
+    // Melodic generator controls. ARP, WALK and ANSWER use the recorded note material
+    // as a non-destructive source; the original recording is retained for
+    // ghost-note display and one-click reset.
+    int generatorRate = 1;       // 16th-note steps between generated notes
+    int generatorDepth = 1;      // ARP octaves / WALK maximum pool jump
+    int generatorSeed = 0;       // deterministic WALK variation
+    bool sourceSnapshotValid = false;
+    std::vector<MidiLaneNote> sourceNotes;
+
     std::vector<MidiLaneNote> notes;
     std::vector<MidiLanePatch> patches;
     std::vector<MidiLaneCc> ccs;
@@ -310,7 +349,7 @@ struct MidiLane
 
 inline const char* midiLaneName(int lane)
 {
-    static constexpr const char* names[] = { "DRUMS", "MOOG", "PROPHET", "KEYS" };
+    static constexpr const char* names[] = { "DRUMS", "MOOG", "MAXPOLY", "KEYS" };
     return names[juce::jlimit(0, kMidiLanes - 1, lane)];
 }
 
@@ -318,6 +357,24 @@ inline int midiLaneChannel(int lane)
 {
     static constexpr int ch[] = { 1, 2, 3, 4 };
     return ch[juce::jlimit(0, kMidiLanes - 1, lane)];
+}
+
+constexpr int kMelodicTracks = kMidiLanes - 1;
+constexpr int kUnifiedTracks = kTracks + kMelodicTracks;
+
+inline bool unifiedTrackIsDrum(int target) noexcept
+{
+    return target >= 0 && target < kTracks;
+}
+
+inline int unifiedTrackMidiLane(int target) noexcept
+{
+    return unifiedTrackIsDrum(target) ? -1 : juce::jlimit(1, kMidiLanes - 1, target - kTracks + 1);
+}
+
+inline int unifiedTrackForMidiLane(int lane) noexcept
+{
+    return kTracks + juce::jlimit(1, kMidiLanes - 1, lane) - 1;
 }
 
 inline int midiLaneIndexForChannel(int channel)
@@ -473,6 +530,47 @@ struct ChannelFxLock
     }
 };
 
+
+struct SharedFxSettings
+{
+    // One shared instance of each effect, with an independent send from every track.
+    // This avoids four copies of each UADx plug-in while still giving every track
+    // its own Paradise/Century/Compressor/Galaxy/Capitol mix amount.
+    std::array<bool, kMixChannels> paradiseSendOn { false, false, false, false };
+    std::array<float, kMixChannels> paradiseSend { 0.0f, 0.0f, 0.0f, 0.0f };
+    std::array<bool, kMixChannels> centurySendOn { false, false, false, false };
+    std::array<float, kMixChannels> centurySend { 0.0f, 0.0f, 0.0f, 0.0f };
+    std::array<bool, kMixChannels> compressorSendOn { true, true, true, true };
+    std::array<float, kMixChannels> compressorSend { 0.20f, 0.20f, 0.20f, 0.20f };
+    std::array<bool, kMixChannels> galaxySendOn { false, false, false, false };
+    std::array<float, kMixChannels> galaxySend { 0.0f, 0.0f, 0.0f, 0.0f };
+    std::array<bool, kMixChannels> capitolSendOn { true, true, true, true };
+    std::array<float, kMixChannels> capitolSend { 0.20f, 0.20f, 0.20f, 0.20f };
+
+    // Legacy v2.1 single-send fields retained only for loading old projects.
+    std::array<bool, kMixChannels> sendOn { false, false, false, false };
+    std::array<float, kMixChannels> send { 0.0f, 0.0f, 0.0f, 0.0f };
+    float returnLevel = 0.75f;
+
+    bool paradiseOn = true;
+    float paradiseInput = 0.70f, paradiseGate = 0.00f, paradiseAmp = 0.78f, paradiseRoom = 0.25f, paradiseOutput = 0.90f;
+
+    bool centuryOn = true;
+    float centuryPreamp = 0.50f, centuryLow = 0.50f, centuryMid = 0.50f, centuryMidFreq = 0.50f;
+    float centuryHigh = 0.50f, centuryComp = 0.25f, centuryOutput = 0.75f;
+
+    bool compressorOn = true;
+    float compThreshold = 0.45f, compRatio = 0.25f, compAttack = 0.15f, compRelease = 0.35f, compMakeup = 0.50f;
+
+    bool galaxyOn = true;
+    float galaxyDelay = 0.45f, galaxyFeedback = 0.35f, galaxyEcho = 0.55f, galaxyReverb = 0.15f;
+    float galaxyTreble = 0.50f, galaxyBass = 0.50f, galaxyInput = 0.50f;
+
+    bool capitolOn = true;
+    float capitolSize = 0.45f, capitolDecay = 0.55f, capitolPreDelay = 0.12f, capitolWidth = 0.75f;
+    float capitolBass = 0.50f, capitolMid = 0.50f, capitolTreble = 0.50f, capitolVolume = 0.80f;
+};
+
 struct MixSettings
 {
     float drumVol = 1.0f;
@@ -491,13 +589,14 @@ struct MixSettings
     float masterVol = 1.0f;
     std::array<float, kEqBands> eqGainDb {};
     std::array<ChannelFx, kMixChannels> channelFx {};
-    std::array<std::array<ChannelFxLock, kSteps>, kMixChannels> fxLocks {};
+    std::array<std::array<ChannelFxLock, kSteps>, kMixChannels> fxLocks {}; // legacy project compatibility
+    SharedFxSettings sharedFx {};
 };
 
 inline constexpr int kMaxTakes = 12;
 
 inline constexpr int kQuantizeNoteCount = 5;
-inline constexpr int kDefaultQuantizeNote = 2; // 1/8
+inline constexpr int kDefaultQuantizeNote = 3; // 1/16
 inline constexpr const char* kQuantizeNoteNames[kQuantizeNoteCount] = {
     "1/2", "1/4", "1/8", "1/16", "1/32"
 };

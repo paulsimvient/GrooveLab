@@ -1,0 +1,7 @@
+Lil God Projector v3.2.1 — BEAT delete fix
+
+- BEAT grid cells now toggle on normal click: empty adds, active removes.
+- Shift-click selects a BEAT cell without changing it.
+- Delete and Backspace remove the currently selected BEAT hit.
+- BEAT view explicitly takes keyboard focus when a grid cell is clicked.
+- Deletion updates the generated seed/section state so the removed hit stays removed.

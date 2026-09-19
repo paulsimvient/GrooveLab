@@ -1,0 +1,10 @@
+Lil God Projector v2.6 — Euclidean All-Track Performance
+
+- One EUC screen selects KICK/SNARE/CLAP/CHH/OHH/PERC1/PERC2/FX/MOOG/PROPHET/KEYS.
+- Same STEP / EUCLID / HYBRID and STEPS / PULSES / ROTATE controls for every target.
+- Drum targets keep drum step/sound controls.
+- Melodic targets show contextual VELOCITY / PROBABILITY / REPEATS / OCTAVE / GATE controls in the same lower panel.
+- In EUCLID/HYBRID, each Euclidean pulse advances through piano-roll note-start events (including chords).
+- STEP mode still plays melodic notes exactly where written.
+- Hybrid gate overrides remain editable in the shared 32-step grid.
+- Melodic Euclidean performance controls save with projects/song sections.

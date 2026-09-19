@@ -1,0 +1,8 @@
+Lil God Projector v2.3 — unified Euclidean editor
+
+- The same EUC page now edits both drum tracks and melodic instrument lanes.
+- Select DRUMS for the existing per-sound Euclidean editor.
+- Select MOOG, PROPHET, or KEYS and open EUC to edit that lane with the same STEPS / PULSES / ROTATE controls.
+- Melodic EUC shows a 32-step gate preview; green pads are active gates and white dots mark note starts from the piano roll.
+- Editing STEPS/PULSES/ROTATE automatically enables Euclidean gating for the selected melodic lane.
+- Notes remain editable in the piano roll; EUC determines when those notes are allowed to trigger.

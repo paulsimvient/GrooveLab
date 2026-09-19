@@ -16,6 +16,7 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
     void refreshFromEngine();
+    bool deleteSelectedBeat();
 
 private:
     void timerCallback() override;
@@ -23,6 +24,7 @@ private:
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
     void mouseUp(const juce::MouseEvent&) override;
+    bool keyPressed(const juce::KeyPress&) override;
     void snapshotHost();
     void restoreHost();
     void beginRecord();

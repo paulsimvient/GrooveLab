@@ -1,0 +1,7 @@
+Lil God Projector v3.7.6 — SEQ visual cleanup
+
+- Compact SHAPE controls so they cannot spill into STEP EDIT.
+- STEP EDIT reduced to one clean row: Velocity / Note / Repeats.
+- Shorter step panel gives more room to rhythm grid.
+- RHYTHM title and pattern summary no longer overlap.
+- Shorter labels and tighter spacing for small window sizes.

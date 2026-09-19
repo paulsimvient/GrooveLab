@@ -4,6 +4,8 @@
 class GrooveLookAndFeel : public juce::LookAndFeel_V4
 {
 public:
+    void setUiScale(float s) noexcept { uiScale = juce::jlimit(0.82f, 1.22f, s); }
+    float getUiScale() const noexcept { return uiScale; }
     GrooveLookAndFeel()
     {
         setColour(juce::ResizableWindow::backgroundColourId, juce::Colour(0xff071018));
@@ -30,6 +32,21 @@ public:
         setColour(juce::PopupMenu::backgroundColourId, juce::Colour(0xff0c1822));
         setColour(juce::PopupMenu::textColourId, juce::Colour(0xffd5ebf7));
         setColour(juce::PopupMenu::highlightedBackgroundColourId, juce::Colour(0xff0f80d8));
+    }
+
+    juce::Font getTextButtonFont(juce::TextButton&, int buttonHeight) override
+    {
+        return juce::Font(juce::FontOptions(juce::jlimit(7.8f, 11.5f, buttonHeight * 0.38f * uiScale)));
+    }
+
+    juce::Font getComboBoxFont(juce::ComboBox&) override
+    {
+        return juce::Font(juce::FontOptions(10.0f * uiScale));
+    }
+
+    juce::Font getLabelFont(juce::Label&) override
+    {
+        return juce::Font(juce::FontOptions(9.5f * uiScale));
     }
 
     void drawButtonBackground(juce::Graphics& g, juce::Button& b,
@@ -82,4 +99,6 @@ public:
         g.setColour(slider.findColour(juce::Slider::thumbColourId));
         g.strokePath(pointer, juce::PathStrokeType(2.0f));
     }
+private:
+    float uiScale = 0.90f;
 };

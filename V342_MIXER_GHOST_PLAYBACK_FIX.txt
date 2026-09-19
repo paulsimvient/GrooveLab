@@ -1,0 +1,7 @@
+Lil God Projector v3.4.2
+
+- Mixer opens automatically at startup.
+- Mixer defaults to DETAIL mode.
+- Floating mixer reattaches/repaints MixStrip on every show/resize to prevent blank windows.
+- ANSWER ghost/source notes are forcibly silenced; pending source voices are cleared when entering ANSWER and source-note note-offs are emitted during preview.
+- Existing per-channel COMP 0.20 + CAPITOL 0.20 defaults retained.

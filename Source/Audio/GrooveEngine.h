@@ -33,6 +33,7 @@ public:
 
     void toggleStep(int track, int step); // cycles inherit -> forceOn -> forceOff
     void selectStep(int track, int step);
+    void selectUnifiedTarget(int target);
     void setBaseParam(int track, Param p, float value);
     void setStepParam(int track, int step, Param p, float value, bool createLock);
     void setLockFromBase(int track, int step, Param p);
@@ -102,6 +103,7 @@ public:
     void removeSongSection(int index);
     void duplicateSongSection(int index);
     void selectSongSection(int index, bool jumpOnBeat = false);
+    bool copySelectedTargetToSongSection(int index);
     int queuedSongSection() const noexcept { return queuedSection.load(); }
     int pendingBeatJumpSection() const noexcept { return pendingBeatJump.load(); }
     void moveSongSection(int from, int to);
@@ -121,6 +123,17 @@ public:
     bool isRecordQuantize() const noexcept { return grooveState.recordQuantize; }
     void setRecordQuantizeNote(int note);
     int getRecordQuantizeNote() const noexcept { return grooveState.recordQuantizeNote; }
+    void setRecordOverwrite(bool shouldOverwrite);
+    bool isRecordOverwrite() const noexcept { return grooveState.recordOverwrite; }
+    void setMidiLaneMuted(int lane, bool muted);
+    void setMidiLaneEuclid(int lane, bool enabled, int steps, int pulses, int rotate);
+    void setMidiLaneRhythmMode(int lane, RhythmMode mode);
+    void setMidiLaneGeneratorControls(int lane, int rate, int depth, int seed);
+    void resetMidiLaneToSource(int lane);
+    void newMidiLaneGeneratedTake(int lane);
+    void keepMidiLaneGeneratedTake(int lane);
+    void setMidiLaneEuclidPerformance(int lane, float velocity, float probability, int repeats, int octave, float gate);
+    void toggleMidiLaneGateOverride(int lane, int step);
     int keepCurrentTake();
     void restoreTake(int index);
     void removeTake(int index);
@@ -216,6 +229,7 @@ private:
     std::atomic<int> pendingBeatJump { -1 };
     std::atomic<bool> playing { false };
     std::atomic<bool> recording { false };
+    bool restoreSongFollowAfterRecord = false;
     std::atomic<bool> performanceTap { false };
     bool followBeforeRecord = true;
     std::vector<IncomingHit> incomingHits;

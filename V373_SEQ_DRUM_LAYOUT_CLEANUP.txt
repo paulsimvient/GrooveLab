@@ -1,0 +1,9 @@
+Lil God Projector v3.7.3
+
+SEQ drum layout cleanup:
+- Removed the duplicate internal TRACKS row from the Euclidean editor.
+- The persistent global track strip is now the only track selector.
+- Reclaimed that vertical space for the selected-step parameter panel.
+- Increased the drum parameter panel height from 168 to 220 px to prevent knob/label overlap.
+- Removed the redundant per-track PLAY buttons inside the editor.
+- Drum/instrument selection and audition remain available from the persistent global strip and keyboard.

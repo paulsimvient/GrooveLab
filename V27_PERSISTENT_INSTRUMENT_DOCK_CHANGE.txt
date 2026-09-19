@@ -1,0 +1,11 @@
+Lil God Projector v2.7 — Persistent Instrument Dock + Split Melodic EUC
+
+- Persistent instrument selection across GRID / EUC / SONG / BEAT.
+- Removed BEAT page's forced switch back to DRUMS.
+- Added always-available instrument dock: DRUMS / MOOG / PROPHET / KEYS.
+- Each dock target has a UI button to open its instrument editor.
+- Dock can switch between docked and modeless floating/movable mode with FLOAT / DOCK.
+- Melodic EUC view is now split: piano-roll notes above and compact Euclidean editor below.
+- Compact melodic EUC keeps MODE / STEPS / PULSES / ROTATE, the 32-step pulse grid, and all-track selector visible.
+- GRID melodic view gives the piano roll the main workspace instead of permanently covering it with the large mixer.
+- Added FIT NOTES to piano roll; it zooms pitch range around existing notes and uses C2-C4 when empty.

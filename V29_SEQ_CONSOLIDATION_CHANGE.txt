@@ -1,0 +1,12 @@
+Lil God Projector v2.9 — SEQ consolidation
+
+- Removed GRID from the primary navigation.
+- Renamed EUC to SEQ.
+- SEQ is now the single composition/sequencing workspace.
+- STEP / EUCLID / HYBRID remain inside SEQ.
+- Melodic tracks keep the split piano-roll + rhythm workspace.
+- Drum tracks keep the full rhythm workspace and drum parameters.
+- SONG and BEAT remain separate because they serve arrangement and performance roles.
+- VIEW renamed to MIXER; clicking it directly shows/hides the persistent modeless floating mixer.
+- Persistent instrument selection continues across SEQ / SONG / BEAT / MIXER.
+- Legacy GRID implementation remains internally for compatibility but is no longer user-visible or navigable.

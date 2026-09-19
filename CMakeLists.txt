@@ -76,6 +76,8 @@ target_sources(GrooveLab PRIVATE
     Source/UI/PianoRoll.cpp
     Source/UI/InstrumentBrowser.h
     Source/UI/InstrumentBrowser.cpp
+    Source/UI/InstrumentDock.h
+    Source/UI/InstrumentDock.cpp
     Source/UI/MainComponent.h
     Source/UI/MainComponent.cpp
     Source/Standalone/Main.cpp

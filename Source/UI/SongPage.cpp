@@ -166,6 +166,16 @@ SongPage::SongPage(groove::GrooveEngine& e)
     };
     addAndMakeVisible(quantizeBox);
 
+    overwriteButton.setClickingTogglesState(true);
+    overwriteButton.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xffb05b16));
+    overwriteButton.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+    overwriteButton.setTooltip("Replace notes already on the same quantized step while recording");
+    overwriteButton.onClick = [this]
+    {
+        engine.setRecordOverwrite(overwriteButton.getToggleState());
+    };
+    addAndMakeVisible(overwriteButton);
+
     keepTakeButton.onClick = [this]
     {
         engine.keepCurrentTake();
@@ -445,6 +455,7 @@ void SongPage::refreshFromEngine()
     quantizeButton.setToggleState(engine.isRecordQuantize(), juce::dontSendNotification);
     quantizeBox.setSelectedId(engine.getRecordQuantizeNote() + 1, juce::dontSendNotification);
     quantizeBox.setEnabled(engine.isRecordQuantize());
+    overwriteButton.setToggleState(engine.isRecordOverwrite(), juce::dontSendNotification);
     deleteTakeButton.setEnabled(! song.sections.empty());
     rebuildTakeButtons();
     refreshing = false;
@@ -538,6 +549,8 @@ void SongPage::resized()
     auto er = editPanel.reduced(16, 0);
     auto title = er.removeFromTop(38);
     recButton.setBounds(title.removeFromRight(64).reduced(0, 4));
+    title.removeFromRight(8);
+    overwriteButton.setBounds(title.removeFromRight(92).reduced(0, 4));
     title.removeFromRight(8);
     deleteTakeButton.setBounds(title.removeFromRight(96).reduced(0, 4));
     title.removeFromRight(8);
@@ -648,6 +661,22 @@ void SongPage::mouseDown(const juce::MouseEvent& e)
         if (! tile.contains(e.getPosition()))
             continue;
 
+        // TAB + click copies only the currently selected global instrument/track
+        // into this section. It does not switch sections, so arranging is fast
+        // and the source performance remains active.
+        const bool tabCopy = juce::KeyPress::isKeyCurrentlyDown(juce::KeyPress::tabKey);
+        if (tabCopy)
+        {
+            if (engine.copySelectedTargetToSongSection(i))
+            {
+                if (onStatusMessage)
+                    onStatusMessage("COPIED SELECTED INSTRUMENT TO SECTION " + juce::String(i + 1));
+                refreshFromEngine();
+                if (onSongChanged) onSongChanged();
+            }
+            return;
+        }
+
         if (sectionDeleteArea(i).contains(e.getPosition()))
         {
             engine.removeSongSection(i);
@@ -660,7 +689,8 @@ void SongPage::mouseDown(const juce::MouseEvent& e)
             engine.selectSongSection(i);
             refreshFromEngine();
             if (onSongChanged) onSongChanged();
-            showPartMenu(i, e.getScreenPosition());
+            if (e.getNumberOfClicks() >= 2)
+                showPartMenu(i, e.getScreenPosition());
             return;
         }
         if (sectionResizeHandle(i).contains(e.getPosition()) && ! e.mods.isShiftDown())
